@@ -1,0 +1,111 @@
+# Voice Assistant v2 - Complete Dependencies
+# Optimized for mini PC with 16GB RAM, fully offline
+# Python 3.10+ required
+
+# =============================================================================
+# CORE AUDIO
+# =============================================================================
+sounddevice>=0.4.6          # Primary audio I/O (ALSA/PortAudio)
+numpy>=1.24.0,<2.0.0        # Array operations (pin <2.0 for compatibility)
+scipy>=1.10.0               # Audio processing utilities
+
+# =============================================================================
+# VOICE ACTIVITY DETECTION (Silero VAD)
+# =============================================================================
+torch>=2.0.0                # Required for Silero VAD
+torchaudio>=2.0.0           # Audio processing for torch
+# Silero VAD is loaded from torch.hub automatically
+
+# =============================================================================
+# SPEECH-TO-TEXT
+# =============================================================================
+faster-whisper>=1.0.0       # CTranslate2-based Whisper
+# Models downloaded automatically:
+# - small.en: Good for accents (~500MB, default)
+# - tiny.en: Fastest, English only (~150MB)
+
+# =============================================================================
+# TEXT-TO-SPEECH
+# =============================================================================
+piper-tts>=1.2.0            # Fast, lightweight TTS
+# Voice models: download with huggingface_hub (see below)
+
+# =============================================================================
+# LANGUAGE MODEL
+# =============================================================================
+llama-cpp-python>=0.2.50    # llama.cpp Python bindings
+# Model: Qwen 2.5 3B Q4_K_M (~2GB) - download separately
+
+# =============================================================================
+# WAKE WORD DETECTION
+# =============================================================================
+openwakeword>=0.6.0         # Wake word detection (Hey Jarvis, etc.)
+
+# =============================================================================
+# FACE DETECTION & RECOGNITION (CPU-optimized)
+# =============================================================================
+# Prerequisites (must install system libs first):
+#   sudo apt-get install cmake build-essential libopenblas-dev liblapack-dev
+face_recognition>=1.3.0     # HOG-based face detection/recognition (uses dlib)
+opencv-python>=4.8.0,<4.10  # Camera capture (pin <4.10 for numpy<2 compatibility)
+# Note: dlib is automatically installed as a dependency of face_recognition
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+python-dotenv>=1.0.0        # Environment configuration
+huggingface_hub>=0.20.0     # Model downloading
+
+# =============================================================================
+# SETUP INSTRUCTIONS FOR MINI PC
+# =============================================================================
+# 
+# 1. Install system dependencies (Ubuntu/Debian):
+#    sudo apt-get update
+#    sudo apt-get install -y cmake build-essential libopenblas-dev liblapack-dev \
+#        libatlas-base-dev gfortran python3-dev portaudio19-dev
+#
+# 2. Create virtual environment:
+#    python3 -m venv venv && source venv/bin/activate
+#
+# 3. Install dependencies:
+#    pip install --upgrade pip wheel setuptools
+#    pip install -r requirements.txt
+#
+# 4. Download TTS voice:
+#    python -c "
+#    from huggingface_hub import hf_hub_download
+#    hf_hub_download('rhasspy/piper-voices', 'en/en_US/libritts/high/en_US-libritts-high.onnx', local_dir='models/tts')
+#    hf_hub_download('rhasspy/piper-voices', 'en/en_US/libritts/high/en_US-libritts-high.onnx.json', local_dir='models/tts')
+#    "
+#
+# 5. Download LLM model (Qwen 2.5 3B):
+#    mkdir -p models/llm
+#    wget -O models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
+#      "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+#
+# 6. Add known faces (optional):
+#    - Drop photos in known_faces/ folder
+#    - Filename becomes person's name (e.g., john.jpg → "Hello, John!")
+#
+# 7. Run the assistant:
+#    python -m pipeline.orchestrator_v2
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+#
+# Face recognition install fails:
+#    pip install cmake
+#    pip install dlib --no-cache-dir
+#    pip install face_recognition
+#
+# No audio devices:
+#    arecord -l              # List capture devices
+#    aplay -l                # List playback devices
+#    alsamixer               # Check volume (F4 for capture)
+#
+# Camera not working:
+#    ls /dev/video*          # Check camera devices
+#    v4l2-ctl --list-devices # List video devices
+#

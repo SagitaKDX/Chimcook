@@ -1,0 +1,30 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs & debug artifacts
+debug_audio/
+debug_frame.jpg
+.cursor/
+*.log
+
+# Model & data caches (large, reproducible)
+models/
+known_faces/
+recordings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
