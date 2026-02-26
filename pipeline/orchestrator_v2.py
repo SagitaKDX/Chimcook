@@ -122,17 +122,16 @@ class VoiceAssistant:
             self._components.audio_output,
         )
         
-        # Face tracking state
-        self._face_greeted = False
-        self._last_face_count = 0
-        self._face_window_until = 0.0  # Accept wake word until this time if face was seen
-        self._session_until = 0.0  # Don't greet again until this time expires
-        self._face_gone_since = 0.0  # Track when face disappeared
-        self._session_duration = 30.0  # Seconds before allowing another greeting
-        # Presence state for smoother face gating (used only when enabled)
+        # Face / presence state (handled in background thread)
         self._is_user_present = False
         self._last_face_seen = 0.0
-        self._face_timeout_sec = getattr(config, "face_window_sec", 5.0)
+        # Greeting/session timing
+        self._last_greeting_time = 0.0
+        self._greet_cooldown_sec = 30.0 * 60.0  # 30 minutes between greetings
+        self._soft_gone_sec = 5.0               # soft gone: temporarily lock wake word
+        self._hard_gone_timeout_sec = 2.0 * 60.0  # hard gone: reset after 2 minutes away
+        self._wake_word_soft_locked = False
+        self._session_duration = 30.0  # Seconds before allowing another greeting/session
         self._face_thread_stop = threading.Event()
         self._face_thread: Optional[threading.Thread] = None
         
@@ -289,7 +288,9 @@ class VoiceAssistant:
                     # Optional gating: only block NEW wake word if face gating is enabled
                     gate_allows_wake = True
                     if self.config.require_face_for_wake_word and self._wake_word and not self._wake_word.is_active:
-                        gate_allows_wake = self._is_user_present
+                        # Only allow starting a new wake-word session when user is present
+                        # and we are not in a soft-locked state.
+                        gate_allows_wake = self._is_user_present and not self._wake_word_soft_locked
                     if not gate_allows_wake:
                         # Ignore this chunk for wake word; still keep VAD buffer alive
                         silero_buffer = np.concatenate([silero_buffer, chunk])
@@ -430,16 +431,49 @@ class VoiceAssistant:
                     result = detector.process_frame()
                     now = time.time()
                     if result.face_count >= 1:
-                        self._last_face_seen = now
+                        # Face detected
                         if not self._is_user_present and self.config.debug:
                             print("[FaceThread] User present")
                         self._is_user_present = True
+                        self._wake_word_soft_locked = False
+                        self._last_face_seen = now
+
+                        # Greet only if cooldown has passed and assistant is idle
+                        if (
+                            self.config.greet_on_face
+                            and (now - self._last_greeting_time) > self._greet_cooldown_sec
+                            and (self._wake_word is None or not self._wake_word.is_active)
+                            and self._state in (AssistantState.IDLE, AssistantState.WAKE_WORD_LISTENING)
+                        ):
+                            greeting = "Hello there, I am Alexa. Say my name to listen to the command."
+                            print(f"\n👋 {greeting}")
+                            self._last_greeting_time = now
+                            self._state = AssistantState.SPEAKING
+                            self._muted_until = self._speech.say(greeting)
+                            self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
+                            self._print_status("say wake word to begin")
                     else:
-                        # Only mark user gone after timeout (face-lock timeout)
-                        if self._is_user_present and (now - self._last_face_seen) > self._face_timeout_sec:
-                            if self.config.debug:
-                                print("[FaceThread] User gone (timeout)")
-                            self._is_user_present = False
+                        # No face detected - check soft/hard gone timings
+                        if self._is_user_present and self._last_face_seen > 0:
+                            elapsed = now - self._last_face_seen
+                            # Soft gone: temporarily lock wake word but keep session/history
+                            if elapsed > self._soft_gone_sec and not self._wake_word_soft_locked:
+                                self._wake_word_soft_locked = True
+                                if self.config.debug:
+                                    print("[FaceThread] Soft gone - temporarily locking wake word")
+                            # Hard gone: user left for a long time, reset session
+                            if elapsed > self._hard_gone_timeout_sec:
+                                if self.config.debug:
+                                    print("[FaceThread] Hard gone - resetting session")
+                                self._is_user_present = False
+                                self._wake_word_soft_locked = True
+                                self._last_face_seen = 0.0
+                                # Reset conversation/session state
+                                if self._wake_word and self._wake_word.is_active:
+                                    self._wake_word.deactivate(with_cooldown=False)
+                                self._speech.clear_history()
+                                self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
+                                self._session_until = 0.0
                     time.sleep(interval)
                 except Exception as e:
                     if self.config.debug:
