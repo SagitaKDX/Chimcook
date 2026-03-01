@@ -288,9 +288,10 @@ class VoiceAssistant:
                     # Optional gating: only block NEW wake word if face gating is enabled
                     gate_allows_wake = True
                     if self.config.require_face_for_wake_word and self._wake_word and not self._wake_word.is_active:
-                        # Only allow starting a new wake-word session when user is present
-                        # and we are not in a soft-locked state.
-                        gate_allows_wake = self._is_user_present and not self._wake_word_soft_locked
+                        # Only block wake word if user is NOT present at all.
+                        # Soft lock is irrelevant here because no session is active —
+                        # we always want to listen for the wake word as long as user is present.
+                        gate_allows_wake = self._is_user_present
                     if not gate_allows_wake:
                         # Ignore this chunk for wake word; still keep VAD buffer alive
                         silero_buffer = np.concatenate([silero_buffer, chunk])
@@ -458,15 +459,22 @@ class VoiceAssistant:
                             elapsed = now - self._last_face_seen
                             # Soft gone: temporarily lock wake word but keep session/history
                             if elapsed > self._soft_gone_sec and not self._wake_word_soft_locked:
-                                self._wake_word_soft_locked = True
-                                if self.config.debug:
-                                    print("[FaceThread] Soft gone - temporarily locking wake word")
+                                # Only soft-lock if there is an active wake word session
+                                # (mid-conversation). If no session, just let the pipeline
+                                # keep listening for wake word normally.
+                                if self._wake_word and self._wake_word.is_active:
+                                    self._wake_word_soft_locked = True
+                                    if self.config.debug:
+                                        print("[FaceThread] Soft gone - temporarily locking wake word (active session)")
+                                else:
+                                    if self.config.debug:
+                                        print("[FaceThread] Soft gone - no active session, staying in listen mode")
                             # Hard gone: user left for a long time, reset session
                             if elapsed > self._hard_gone_timeout_sec:
                                 if self.config.debug:
                                     print("[FaceThread] Hard gone - resetting session")
                                 self._is_user_present = False
-                                self._wake_word_soft_locked = True
+                                self._wake_word_soft_locked = False
                                 self._last_face_seen = 0.0
                                 # Reset conversation/session state
                                 if self._wake_word and self._wake_word.is_active:
