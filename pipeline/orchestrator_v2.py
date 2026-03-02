@@ -308,32 +308,20 @@ class VoiceAssistant:
                     if getattr(self, '_was_muted', False):
                         self._was_muted = False
                         if self._wake_word:
-                            self._wake_word._model.reset()
+                            self._wake_word.reset_full()
                     
                     # Face detection is now decoupled from the main audio pipeline.
                     # Any camera/face issues will NOT stop wake word or VAD/STT flow.
-                    # Optional gating: only block NEW wake word if face gating is enabled
+                    # Optional gating for wake word acceptance based on face presence
                     gate_allows_wake = True
                     if self.config.require_face_for_wake_word and self._wake_word and not self._wake_word.is_active:
-                        # Only block wake word if user is NOT present at all.
-                        # Soft lock is irrelevant here because no session is active —
-                        # we always want to listen for the wake word as long as user is present.
                         gate_allows_wake = self._is_user_present
-                    if not gate_allows_wake:
-                        # Ignore this chunk for wake word; still keep VAD buffer alive
-                        self._was_gate_closed = True
-                        silero_buffer = np.concatenate([silero_buffer, chunk])
-                        continue
-                        
-                    # Face is back (or gate never closed) → clear any frozen wake word buffer
-                    if getattr(self, '_was_gate_closed', False):
-                        self._was_gate_closed = False
-                        if self._wake_word:
-                            self._wake_word._model.reset()
                     
                     # === WAKE WORD (uses full 80ms chunk) ===
-                    # Pass face_detected=True so wake word is fully audio-driven now.
-                    if not self._handle_wake_word(chunk, face_detected=True):
+                    # Always process the frame to keep OpenWakeWord's internal buffer moving in real-time,
+                    # but tell it whether the face gate allows triggering right now.
+                    if not self._handle_wake_word(chunk, face_detected=gate_allows_wake):
+                        # Wake word isn't fully active yet (either listening, or heard but ignored due to no face)
                         collected_frames = []
                         raw_chunks_for_utterance = []
                         is_recording = False
@@ -439,7 +427,7 @@ class VoiceAssistant:
                                             # Hard 8-second cooldown from NOW
                                             # (covers TTS playback + audio buffer flush)
                                             self._wake_word._state.cooldown = time.time() + 8.0
-                                            self._wake_word._model.reset()
+                                            self._wake_word.reset_full()
                                         self._state = AssistantState.WAKE_WORD_LISTENING
                                         self._print_status()
                                     elif self._wake_word:
@@ -516,9 +504,15 @@ class VoiceAssistant:
                             self._muted_until = time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
                             if self._wake_word:
                                 self._wake_word._state.cooldown = self._muted_until + 0.5
-                                self._wake_word._model.reset()
+                                self._wake_word.reset_full()
+                            # Tell main loop we're muted so it does its own reset when mute expires
+                            self._was_muted = True
                             # NOW play (safe - mute is already set)
                             self._speech._audio_output.play(audio, sr)
+                            # After playback: reset AGAIN to flush any TTS reverb/echo
+                            # that leaked through mic into preprocessor during playback
+                            if self._wake_word:
+                                self._wake_word.reset_full()
                             self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
                             self._print_status("say wake word to begin")
                     else:

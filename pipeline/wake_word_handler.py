@@ -60,7 +60,7 @@ class WakeWordHandler:
         self._state.is_active = False
         if with_cooldown:
             self._state.cooldown = time.time() + self.config.wake_word_cooldown_sec
-        self._model.reset()
+        self.reset_full()
     
     def extend_timeout(self) -> None:
         """Extend the wake word timeout."""
@@ -86,15 +86,19 @@ class WakeWordHandler:
         if self._state.is_active:
             return None  # Already active
         
-        if self.is_in_cooldown:
-            return None  # In cooldown
-        
         # Convert to int16 for wake word model
         chunk_int16 = (chunk * 32767).astype(np.int16)
         
-        # Run prediction
+        # ALWAYS run predict() to keep the preprocessor's internal audio
+        # feature buffers (melspectrogram, embeddings) moving in real-time.
+        # If we skip predict() during cooldown, those buffers freeze and
+        # the first call after cooldown reads stale TTS features → false trigger.
         prediction = self._model.predict(chunk_int16)
         score = prediction.get(self._name, 0.0)
+        
+        # During cooldown, we fed the audio but ignore the result
+        if self.is_in_cooldown:
+            return None
         
         # Only print when score is notable
         if score > 0.1:
@@ -113,5 +117,27 @@ class WakeWordHandler:
     def reset(self) -> None:
         """Reset all state."""
         self._state = WakeWordState()
+        self.reset_full()
+    
+    def reset_full(self) -> None:
+        """Full reset: clear Model prediction buffer AND preprocessor audio buffers.
+        
+        Model.reset() only clears prediction_buffer (score history).
+        The preprocessor still holds mel/embedding features from old audio.
+        We must clear those too, otherwise the first predict() after reset
+        reads stale features and triggers falsely.
+        """
         if self._model:
             self._model.reset()
+            # Clear preprocessor audio feature buffers
+            pp = self._model.preprocessor
+            if hasattr(pp, 'raw_data_buffer'):
+                pp.raw_data_buffer = []
+            if hasattr(pp, 'melspectrogram_buffer'):
+                import numpy as _np
+                pp.melspectrogram_buffer = _np.zeros(pp.melspectrogram_buffer.shape, dtype=pp.melspectrogram_buffer.dtype)
+            if hasattr(pp, 'feature_buffer'):
+                import numpy as _np
+                pp.feature_buffer = _np.zeros(pp.feature_buffer.shape, dtype=pp.feature_buffer.dtype)
+            if hasattr(pp, 'accumulated_samples'):
+                pp.accumulated_samples = 0

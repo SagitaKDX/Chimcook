@@ -154,14 +154,19 @@ class SpeechProcessor:
         return any(phrase in text_lower for phrase in GOODBYE_PHRASES)
     
     def _handle_goodbye(self) -> Tuple[bool, float]:
-        """Handle goodbye response."""
-        print("🤖 Assistant: Goodbye! I'll be here when you need me.")
+        """Handle goodbye response. Synthesizes TTS, calculates mute duration, then plays."""
+        goodbye_text = "Goodbye! I'll be here when you need me."
+        print(f"🤖 Assistant: {goodbye_text}")
         
-        goodbye_audio, sr = self._tts.synthesize("Goodbye! I'll be here when you need me.")
+        # Synthesize FIRST so we know the exact audio duration
+        goodbye_audio, sr = self._tts.synthesize(goodbye_text)
+        audio_duration = len(goodbye_audio) / sr
+        
+        # Set mute to cover the full playback + 3 second buffer after
+        mute_until = time.time() + audio_duration + 3.0
+        
+        # NOW play (caller should have set _muted_until before this returns)
         self._audio_output.play(goodbye_audio, sr)
-        
-        # Simple 3-second mute after goodbye
-        mute_until = time.time() + 3.0
         
         return True, mute_until
     
@@ -193,11 +198,13 @@ class SpeechProcessor:
         if self.config.debug:
             print(f"   [TTS: {tts_time:.2f}s]")
         
+        # Calculate mute BEFORE playing so it covers the actual playback window
+        audio_duration = len(tts_audio) / sr
+        mute_until = time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
+        
         self._audio_output.play(tts_audio, sr)
         
-        # Mute for full audio playback duration + buffer
-        audio_duration = len(tts_audio) / sr
-        return time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
+        return mute_until
     
     def _add_to_history(self, role: str, content: str) -> None:
         """Add message to conversation history."""
