@@ -93,7 +93,7 @@ Be friendly and cheerful in your tone."""
     # =========================================================================
     # Self-Voice Filtering
     # =========================================================================
-    mute_during_speech_ms: int = 300  # Extra mute time after TTS
+    mute_during_speech_ms: int = 200  # Extra mute after TTS (covers output buffer latency)
     
     # =========================================================================
     # Debug Settings

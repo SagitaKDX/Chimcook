@@ -177,13 +177,22 @@ class VoiceAssistant:
         # Some USB mics (e.g. M70) reject 16k capture; prefer device default (often 48k) and resample.
         input_device = self.config.audio_device
         input_sr = PROCESS_SR
+        input_channels = 1  # default mono; will be overridden if device needs more
         try:
             if input_device is not None:
                 dev = sd.query_devices(input_device)
                 dev_default_sr = int(dev.get("default_samplerate", 0) or 0) if isinstance(dev, dict) else 0
+                dev_max_ch = int(dev.get("max_input_channels", 0) or 0) if isinstance(dev, dict) else 0
                 # If device default is set and differs from 16k, use device default to avoid paInvalidSampleRate spam
                 if dev_default_sr and dev_default_sr != PROCESS_SR:
                     input_sr = dev_default_sr
+                # If device has no input channels, it's output-only — warn and use default
+                if dev_max_ch == 0:
+                    print(f"⚠️  Device {input_device} has 0 input channels (output-only?). Falling back to default input device.")
+                    input_device = None
+                elif dev_max_ch > 0:
+                    # Use device's supported channel count (some devices reject channels=1)
+                    input_channels = dev_max_ch
         except Exception:
             pass
         
@@ -238,11 +247,11 @@ class VoiceAssistant:
         
         try:
             # Single audio stream with blocking reads
-            def open_stream(sr: int):
+            def open_stream(sr: int, ch: int = input_channels):
                 return sd.InputStream(
                     samplerate=sr,
                     device=input_device,
-                    channels=1,
+                    channels=ch,
                     dtype="float32",
                     blocksize=int(sr * CHUNK_MS / 1000),
                     latency="low",
@@ -262,26 +271,44 @@ class VoiceAssistant:
                 stream_cm = open_stream(input_sr)
             
             with stream_cm as stream:
-                channels=1,
-                print("Audio stream started (single stream for all)")
+                print(f"Audio stream started (single stream for all, {input_channels}ch @ {input_sr}Hz)")
                 
                 while self._running:
                     # Blocking read - get one 80ms chunk
-                    audio_data, overflowed = stream.read(input_chunk_samples)
+                    try:
+                        audio_data, overflowed = stream.read(input_chunk_samples)
+                    except Exception as e:
+                        print(f"Audio read error: {e}")
+                        continue
+                        
                     if overflowed:
                         continue
                     
-                    # Convert to 1D float32
-                    chunk_in = audio_data.flatten().astype(np.float32)
+                    # Convert to mono 1D float32 (take channel 0 if multi-channel)
+                    if audio_data.ndim > 1 and audio_data.shape[1] > 1:
+                        chunk_in = audio_data[:, 0].astype(np.float32)
+                    else:
+                        chunk_in = audio_data.flatten().astype(np.float32)
                     chunk = resample_to_16k(chunk_in, input_sr)
                     # Apply mic gain boost at 16k stage (pre wakeword/VAD)
                     if getattr(self.config, "mic_gain", 1.0) != 1.0:
                         chunk = (chunk * float(self.config.mic_gain)).clip(-1.0, 1.0).astype(np.float32)
                     
-                    # Skip if muted
+                    # Skip processing if muted (TTS playing)
+                    # BUT KEEP READING to prevent buffer accumulation!
+                    # If we don't read, sounddevice caches the chunks (with TTS residue)
+                    # and bursts them all to the wake word model when mute expires.
                     current_time = time.time()
                     if current_time < self._muted_until:
+                        self._was_muted = True
                         continue
+                    
+                    # Just came out of mute → reset wake word model
+                    # to clear any residual activation from TTS leak
+                    if getattr(self, '_was_muted', False):
+                        self._was_muted = False
+                        if self._wake_word:
+                            self._wake_word._model.reset()
                     
                     # Face detection is now decoupled from the main audio pipeline.
                     # Any camera/face issues will NOT stop wake word or VAD/STT flow.
@@ -294,8 +321,15 @@ class VoiceAssistant:
                         gate_allows_wake = self._is_user_present
                     if not gate_allows_wake:
                         # Ignore this chunk for wake word; still keep VAD buffer alive
+                        self._was_gate_closed = True
                         silero_buffer = np.concatenate([silero_buffer, chunk])
                         continue
+                        
+                    # Face is back (or gate never closed) → clear any frozen wake word buffer
+                    if getattr(self, '_was_gate_closed', False):
+                        self._was_gate_closed = False
+                        if self._wake_word:
+                            self._wake_word._model.reset()
                     
                     # === WAKE WORD (uses full 80ms chunk) ===
                     # Pass face_detected=True so wake word is fully audio-driven now.
@@ -388,12 +422,24 @@ class VoiceAssistant:
                                 if speech_frames >= self._min_speech_frames:
                                     print()
                                     
+                                    # Play thinking chime so user knows AI heard them
+                                    chime_mute = self._speech.play_thinking_chime()
+                                    if chime_mute > self._muted_until:
+                                        self._muted_until = chime_mute
+                                    
                                     should_end = self._process_collected_speech(collected_frames, raw_chunks_for_utterance, recordings_dir)
                                     
                                     raw_chunks_for_utterance = []
                                     if should_end:
+                                        # Full session reset on goodbye
+                                        self._speech.clear_history()
+                                        self._wake_word_soft_locked = False
                                         if self._wake_word:
-                                            self._wake_word.deactivate(with_cooldown=False)
+                                            self._wake_word.deactivate(with_cooldown=True)
+                                            # Hard 8-second cooldown from NOW
+                                            # (covers TTS playback + audio buffer flush)
+                                            self._wake_word._state.cooldown = time.time() + 8.0
+                                            self._wake_word._model.reset()
                                         self._state = AssistantState.WAKE_WORD_LISTENING
                                         self._print_status()
                                     elif self._wake_word:
@@ -435,22 +481,44 @@ class VoiceAssistant:
                         # Face detected
                         if not self._is_user_present and self.config.debug:
                             print("[FaceThread] User present")
+
+                        # Auto-resume: if user was soft-locked (had active session)
+                        # and comes back, re-activate wake word immediately
+                        was_soft_locked = self._wake_word_soft_locked
                         self._is_user_present = True
                         self._wake_word_soft_locked = False
                         self._last_face_seen = now
 
+                        if was_soft_locked and self._wake_word and not self._wake_word.is_active:
+                            print("\n🔄 Welcome back! Resuming conversation...")
+                            self._wake_word.activate()
+                            self._wake_word.extend_timeout()
+                            self._state = AssistantState.IDLE
+                            self._print_status("listening for your question...")
+
                         # Greet only if cooldown has passed and assistant is idle
-                        if (
+                        elif (
                             self.config.greet_on_face
                             and (now - self._last_greeting_time) > self._greet_cooldown_sec
                             and (self._wake_word is None or not self._wake_word.is_active)
                             and self._state in (AssistantState.IDLE, AssistantState.WAKE_WORD_LISTENING)
                         ):
-                            greeting = "Hello there, I am Alexa. Say my name to listen to the command."
+                            greeting = "Hello there! Just say the wake word when you're ready to talk."
                             print(f"\n👋 {greeting}")
                             self._last_greeting_time = now
                             self._state = AssistantState.SPEAKING
-                            self._muted_until = self._speech.say(greeting)
+                            # Synthesize FIRST, then pre-set mute BEFORE playing
+                            # (face thread runs concurrently with main audio loop -
+                            #  if we mute AFTER play(), the main loop processes
+                            #  speaker audio during playback → wake word self-triggers)
+                            audio, sr = self._speech._tts.synthesize(greeting)
+                            audio_duration = len(audio) / sr
+                            self._muted_until = time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
+                            if self._wake_word:
+                                self._wake_word._state.cooldown = self._muted_until + 0.5
+                                self._wake_word._model.reset()
+                            # NOW play (safe - mute is already set)
+                            self._speech._audio_output.play(audio, sr)
                             self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
                             self._print_status("say wake word to begin")
                     else:
@@ -637,6 +705,14 @@ class VoiceAssistant:
         if self._wake_word.check_timeout():
             print("\n⏰ Wake word timeout. Going back to sleep...")
             self._wake_word.deactivate(with_cooldown=True)  # Enable cooldown
+            # Extend cooldown to let OpenWakeWord internal state decay
+            # (residual activation can cause immediate re-trigger)
+            self._wake_word._state.cooldown = max(
+                self._wake_word._state.cooldown,
+                time.time() + 3.0,
+            )
+            # Clear soft-lock so face thread doesn't falsely auto-resume
+            self._wake_word_soft_locked = False
             self._state = AssistantState.WAKE_WORD_LISTENING
             self._print_status()
             
@@ -752,6 +828,45 @@ class VoiceAssistant:
 # MAIN ENTRY POINT
 # =============================================================================
 
+def _find_preferred_input_device() -> "int | None":
+    """Auto-detect the best input device by name preference.
+
+    Priority order:
+      1. AUDIO_DEVICE env var (manual override, e.g. AUDIO_DEVICE=3)
+      2. Device whose name contains "M70"
+      3. Device whose name contains "MB50"
+      4. None → sounddevice will use the system default input device
+    """
+    import os
+    import sounddevice as sd
+
+    # Manual override always wins
+    _env = os.environ.get("AUDIO_DEVICE", "").strip()
+    if _env:
+        try:
+            idx = int(_env)
+            print(f"🔧 Using AUDIO_DEVICE override: device {idx}")
+            return idx
+        except ValueError:
+            pass
+
+    # Preferred device names (first match wins)
+    preferred_names = ["M70", "MB50"]
+    devices = sd.query_devices()
+
+    for pref in preferred_names:
+        for idx, dev in enumerate(devices):
+            name = dev.get("name", "") if isinstance(dev, dict) else ""
+            max_in = int(dev.get("max_input_channels", 0) or 0) if isinstance(dev, dict) else 0
+            if pref.lower() in name.lower() and max_in > 0:
+                print(f"🎤 Auto-selected input device {idx}: {name} ({max_in}ch)")
+                return idx
+
+    # Fallback: system default
+    print("🎤 No preferred device found, using system default input")
+    return None
+
+
 def main():
     """Run the voice assistant."""
     import os
@@ -760,9 +875,7 @@ def main():
     print("=" * 40)
     print()
     
-    # Audio input device: 1 = M70/MB50 USB mic (default). Override via terminal: AUDIO_DEVICE=0 python -m pipeline.orchestrator_v2
-    _env_device = os.environ.get("AUDIO_DEVICE")
-    audio_device = int(_env_device) if _env_device not in (None, "") else 1
+    audio_device = _find_preferred_input_device()
     
     # Debug: set DEBUG=1 to trace face vs wake word when going back to sleep
     debug = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")

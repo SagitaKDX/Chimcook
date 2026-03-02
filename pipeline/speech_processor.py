@@ -155,14 +155,13 @@ class SpeechProcessor:
     
     def _handle_goodbye(self) -> Tuple[bool, float]:
         """Handle goodbye response."""
-        print("🤖 Assistant: Goodbye! Say the wake word when you need me!")
+        print("🤖 Assistant: Goodbye! I'll be here when you need me.")
         
-        goodbye_audio, sr = self._tts.synthesize("Goodbye! Say the wake word when you need me!")
+        goodbye_audio, sr = self._tts.synthesize("Goodbye! I'll be here when you need me.")
         self._audio_output.play(goodbye_audio, sr)
         
-        # Mute for full audio duration + buffer
-        audio_duration = len(goodbye_audio) / sr
-        mute_until = time.time() + audio_duration + 1.0
+        # Simple 3-second mute after goodbye
+        mute_until = time.time() + 3.0
         
         return True, mute_until
     
@@ -196,8 +195,9 @@ class SpeechProcessor:
         
         self._audio_output.play(tts_audio, sr)
         
-        # Return mute timestamp
-        return time.time() + (self.config.mute_during_speech_ms / 1000.0)
+        # Mute for full audio playback duration + buffer
+        audio_duration = len(tts_audio) / sr
+        return time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
     
     def _add_to_history(self, role: str, content: str) -> None:
         """Add message to conversation history."""
@@ -234,7 +234,9 @@ class SpeechProcessor:
         """
         audio, sr = self._tts.synthesize(text)
         self._audio_output.play(audio, sr)
-        return time.time() + (self.config.mute_during_speech_ms / 1000.0)
+        # Mute for full audio playback duration + buffer
+        audio_duration = len(audio) / sr
+        return time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
     
     def play_acknowledgment(self) -> float:
         """
@@ -255,3 +257,25 @@ class SpeechProcessor:
         
         # No ack file - just return with minimal mute
         return time.time() + 0.1
+    
+    def play_thinking_chime(self) -> float:
+        """
+        Speak a short acknowledgment to let the user know the AI is processing.
+        
+        Uses random phrases to keep it feeling natural.
+        Returns mute_until timestamp.
+        """
+        import random
+        phrases = [
+            "Got it, let me think...",
+            "Hmm, one moment...",
+            "Let me check that for you...",
+            "Sure, give me a sec...",
+            "On it!",
+            "Let me think about that...",
+            "Good question, one moment...",
+        ]
+        phrase = random.choice(phrases)
+        if self.config.debug:
+            print(f"   [Thinking: \"{phrase}\"]")
+        return self.say(phrase)
