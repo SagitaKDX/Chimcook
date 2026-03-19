@@ -1,0 +1,50 @@
+# Virtual environment
+venv/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.code-workspace
+
+# Models (downloaded during build)
+models/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Debug / test artifacts
+debug_audio/
+recordings/
+logs/
+*.wav
+*.log
+debug_frame.jpg
+
+# Test files
+test_*.py
+tests/
+debug_*.py
+visualize_*.py
+check_*.py
+list_*.py
+pect
+
+# Documentation (not needed in image)
+*.md
+assets/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Gemini
+.gemini/
+.agents/

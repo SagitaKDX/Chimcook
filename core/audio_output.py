@@ -129,20 +129,44 @@ class AudioOutput:
         # Ensure proper shape for sounddevice (samples, channels)
         if audio.ndim == 1:
             audio = audio.reshape(-1, 1)
-        
+            
         with self._lock:
             self._is_playing = True
         
-        # Play with error handling for ALSA conflicts
-        try:
-            sd.play(
-                audio, 
-                samplerate=sample_rate,
-                device=self.config.device,
-                latency=self.config.latency,
-            )
-        except sd.PortAudioError as e:
-            print(f"[AudioOutput] Warning: Audio playback error: {e}")
+        # Try multiple sample rates to avoid ALSA paInvalidSampleRate
+        # We try 48000 first as it matches the orchestrator's common fallback
+        # and is the most common hardware/PulseAudio rate.
+        backups = [48000, 16000, 44100, sample_rate]
+        # Remove duplicates while preserving order
+        trial_rates = []
+        for r in backups:
+            if r not in trial_rates:
+                trial_rates.append(r)
+        
+        last_err = None
+        import scipy.signal
+        
+        for rate in trial_rates:
+            try:
+                # Resample if needed for this trial
+                if rate == sample_rate:
+                    current_audio = audio
+                else:
+                    current_audio = scipy.signal.resample_poly(audio, rate, sample_rate)
+                
+                sd.play(
+                    current_audio, 
+                    samplerate=rate,
+                    device=self.config.device,
+                    latency=self.config.latency,
+                )
+                # If we get here, the stream opened!
+                break
+            except sd.PortAudioError as e:
+                last_err = e
+                continue
+        else:
+            print(f"[AudioOutput] Warning: Audio playback error (tried {trial_rates}): {last_err}")
             with self._lock:
                 self._is_playing = False
             return

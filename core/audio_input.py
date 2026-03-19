@@ -209,41 +209,132 @@ class AudioInput:
                 print(f"         List devices: python -c \"import sounddevice as sd; print(sd.query_devices())\"")
 
     def _start_sounddevice(self) -> None:
-        """Initialize and start sounddevice stream."""
+        """Initialize and start sounddevice stream with rate fallback."""
         import sounddevice as sd
+        import scipy.signal
+        
+        # Determine trial rates
+        trial_rates = [self.config.sample_rate, 48000, 44100, 16000]
+        if self.config.device is not None:
+            dev = sd.query_devices(self.config.device)
+            if isinstance(dev, dict) and "default_samplerate" in dev:
+                trial_rates.insert(0, int(dev["default_samplerate"]))
+                
+        unique_rates = []
+        for r in trial_rates:
+            if r not in unique_rates:
+                unique_rates.append(r)
+                
+        last_e = None
+        for rate in unique_rates:
+            try:
+                # We need to adjust blocksize based on the *actual hardware rate*
+                hw_blocksize = int(rate * self.config.frame_ms / 1000)
+                
+                def make_callback(hw_rate):
+                    def sd_callback(indata, frames, time_info, status):
+                        if status:
+                            if status.input_overflow:
+                                self._overflow_count += 1
+                            if status.input_underflow:
+                                self._underflow_count += 1
+                        
+                        audio = indata.copy().flatten().astype(np.float32)
+                        
+                        # Resample down/up to expected rate if hardware rate differs
+                        if hw_rate != self.config.sample_rate:
+                            audio = scipy.signal.resample_poly(audio, self.config.sample_rate, hw_rate).astype(np.float32)
+                            
+                        # Apply gain
+                        if self.config.mic_gain != 1.0:
+                            audio = (audio * self.config.mic_gain).clip(-1.0, 1.0)
+                        
+                        with self._buffer_lock:
+                            self._buffer = np.concatenate([self._buffer, audio])
+                            while len(self._buffer) >= self.frame_samples:
+                                frame = self._buffer[:self.frame_samples].copy()
+                                self._buffer = self._buffer[self.frame_samples:]
+                                try:
+                                    self._queue.put_nowait(frame)
+                                except queue.Full:
+                                    pass
+                    return sd_callback
 
-        self._stream = sd.InputStream(
-            samplerate=self.config.sample_rate,
-            channels=self.config.channels,
-            dtype='float32',
-            blocksize=self.frame_samples,
-            callback=self._audio_callback,
-            device=self.config.device,
-            latency='low',
-        )
-        self._stream.start()
+                self._stream = sd.InputStream(
+                    samplerate=rate,
+                    channels=self.config.channels,
+                    dtype='float32',
+                    blocksize=hw_blocksize,
+                    callback=make_callback(rate),
+                    device=self.config.device,
+                    latency='low',
+                )
+                self._stream.start()
+                if rate != self.config.sample_rate:
+                    print(f"  [Mic] Hardware forced capture rate {rate}Hz, resampling to {self.config.sample_rate}Hz")
+                return # Success
+            except Exception as e:
+                last_e = e
+                continue
+                
+        raise RuntimeError(f"Could not open sounddevice capture. Tried rates {unique_rates}. Error: {last_e}")
 
     def _start_pyaudio(self) -> None:
         """Initialize and start PyAudio stream (fallback)."""
         import pyaudio
+        import scipy.signal
         
         self._pa = pyaudio.PyAudio()
         
-        def pa_callback(in_data, frame_count, time_info, status):
-            audio = np.frombuffer(in_data, dtype=np.float32)
-            self._audio_callback(audio.reshape(-1, 1), frame_count, time_info, None)
-            return (None, pyaudio.paContinue)
-        
-        self._stream = self._pa.open(
-            format=pyaudio.paFloat32,
-            channels=self.config.channels,
-            rate=self.config.sample_rate,
-            input=True,
-            frames_per_buffer=self.frame_samples,
-            stream_callback=pa_callback,
-            input_device_index=self.config.device,
-        )
-        self._stream.start_stream()
+        trial_rates = [self.config.sample_rate, 48000, 44100, 16000]
+        unique_rates = []
+        for r in trial_rates:
+            if r not in unique_rates:
+                unique_rates.append(r)
+                
+        last_e = None
+        for rate in unique_rates:
+            try:
+                hw_frames = int(rate * self.config.frame_ms / 1000)
+                
+                def make_callback(hw_rate):
+                    def pa_callback(in_data, frame_count, time_info, status):
+                        audio = np.frombuffer(in_data, dtype=np.float32)
+                        if hw_rate != self.config.sample_rate:
+                            audio = scipy.signal.resample_poly(audio, self.config.sample_rate, hw_rate).astype(np.float32)
+                        if self.config.mic_gain != 1.0:
+                            audio = (audio * self.config.mic_gain).clip(-1.0, 1.0)
+                        
+                        with self._buffer_lock:
+                            self._buffer = np.concatenate([self._buffer, audio])
+                            while len(self._buffer) >= self.frame_samples:
+                                frame = self._buffer[:self.frame_samples].copy()
+                                self._buffer = self._buffer[self.frame_samples:]
+                                try:
+                                    self._queue.put_nowait(frame)
+                                except queue.Full:
+                                    pass
+                        return (None, pyaudio.paContinue)
+                    return pa_callback
+                
+                self._stream = self._pa.open(
+                    format=pyaudio.paFloat32,
+                    channels=self.config.channels,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=hw_frames,
+                    stream_callback=make_callback(rate),
+                    input_device_index=self.config.device,
+                )
+                self._stream.start_stream()
+                if rate != self.config.sample_rate:
+                    print(f"  [Mic] PyAudio forced capture rate {rate}Hz, resampling to {self.config.sample_rate}Hz")
+                return # Success
+            except Exception as e:
+                last_e = e
+                continue
+                
+        raise RuntimeError(f"Could not open PyAudio capture. Tried rates {unique_rates}. Error: {last_e}")
 
     def stop(self) -> None:
         """Stop capturing audio and cleanup resources."""

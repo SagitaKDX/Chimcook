@@ -39,7 +39,7 @@ class VoiceAssistantConfig:
     sample_rate: int = 16000
     channels: int = 1
     frame_ms: int = 20
-    audio_device: Optional[int] = 1  # 1 = M70/MB50 USB mic; 0 = USB Composite; None = system default
+    audio_device: Optional[int] = None  # None = system default (PulseAudio); 0/1 = specific ALSA hardware index
     mic_gain: float = 1.2  # Microphone boost (1.0 = none; >1.2 dễ rè nếu mic đã to)
     
     # =========================================================================

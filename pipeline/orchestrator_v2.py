@@ -257,18 +257,32 @@ class VoiceAssistant:
                     latency="low",
                 )
             
-            try:
-                stream_cm = open_stream(input_sr)
-            except Exception:
-                # Fallback to device default samplerate (often 48000)
-                if input_device is not None:
-                    dev = sd.query_devices(input_device)
-                    fallback_sr = int(dev.get("default_samplerate", 48000) or 48000) if isinstance(dev, dict) else 48000
-                else:
-                    fallback_sr = 48000
-                input_sr = fallback_sr
-                input_chunk_samples = int(input_sr * CHUNK_MS / 1000)
-                stream_cm = open_stream(input_sr)
+            stream_cm = None
+            trial_rates = [16000, 48000, 44100]
+            if input_device is not None:
+                dev = sd.query_devices(input_device)
+                if isinstance(dev, dict) and "default_samplerate" in dev:
+                    trial_rates.insert(0, int(dev["default_samplerate"]))
+            
+            # Remove duplicates preserving order
+            unique_rates = []
+            for r in trial_rates:
+                if r not in unique_rates:
+                    unique_rates.append(r)
+            
+            last_err = None
+            for rate in unique_rates:
+                try:
+                    stream_cm = open_stream(rate)
+                    input_sr = rate
+                    input_chunk_samples = int(input_sr * CHUNK_MS / 1000)
+                    break # Success!
+                except Exception as e:
+                    last_err = e
+                    continue
+            
+            if stream_cm is None:
+                raise RuntimeError(f"Could not open audio input stream with any rate {unique_rates}. Last error: {last_err}")
             
             with stream_cm as stream:
                 print(f"Audio stream started (single stream for all, {input_channels}ch @ {input_sr}Hz)")
