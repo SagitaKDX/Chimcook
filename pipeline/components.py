@@ -155,20 +155,22 @@ class ComponentManager:
     
     def _init_stt(self) -> None:
         """Initialize speech-to-text."""
-        import os
+        import os, math
         all_cores = os.cpu_count() or 4
-        print(f"[5/8] Speech-to-Text (distil-large-v3, {all_cores} threads)...")
+        threads_90 = max(1, math.ceil(all_cores * 0.9))
+        print(f"[5/8] Speech-to-Text (distil-large-v3, {threads_90}/{all_cores} threads = 90%)...")
         from core.stt import STT, STTConfigForAccents
         self.stt = STT(STTConfigForAccents(
-            cpu_threads=all_cores,   # Use every core on the MiniPC
+            cpu_threads=threads_90,  # 90% of all MiniPC cores
             compute_type="int8",
         ))
     
     def _init_llm(self) -> None:
         """Initialize language model."""
-        import os
+        import os, math
         all_cores = os.cpu_count() or 4
-        print(f"[6/8] Language Model (Qwen 2.5 3B, {all_cores} threads)...")
+        threads_90 = max(1, math.ceil(all_cores * 0.9))
+        print(f"[6/8] Language Model (Qwen 2.5 3B, {threads_90}/{all_cores} threads = 90%)...")
         from core.llm import LLM, LLMConfig
         
         model_path = self.config.llm_model_path
@@ -178,8 +180,8 @@ class ComponentManager:
         self.llm = LLM(LLMConfig(
             model_path=model_path,
             n_ctx=2048,
-            n_threads=all_cores,    # Use every core on the MiniPC
-            max_tokens=80,          # Shorter replies = faster first TTS byte
+            n_threads=threads_90,   # 90% of all MiniPC cores
+            max_tokens=80,
         ))
     
     def _find_llm_model(self) -> str:

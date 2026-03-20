@@ -15,6 +15,12 @@ services:
       - /dev/snd:/dev/snd           # ALSA audio devices
       - /dev/video0:/dev/video0     # Camera
 
+    # ── Resource limits (90 % of host CPU) ────────────────────────────────────
+    # CPUS env var = number of CPU cores to allow (e.g. CPUS=7.2 for 8-core MiniPC)
+    # Leave CPUS unset (or 0) to let Python threading control usage instead.
+    cpus: "${CPUS:-0}"
+    shm_size: 512m                  # Shared memory for large ML model loading
+
     # PulseAudio for audio I/O
     volumes:
       - /run/user/1000/pulse:/run/user/1000/pulse:ro
