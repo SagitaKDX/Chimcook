@@ -7,7 +7,7 @@ After=default.target pulseaudio.service graphical-session.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/sagitakdx/Desktop/Code/Chimcook
+WorkingDirectory=%h/voice_assistant_v2
 
 # Start the container stack
 ExecStart=/usr/bin/docker compose up -d
