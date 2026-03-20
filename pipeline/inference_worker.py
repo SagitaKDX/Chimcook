@@ -171,7 +171,7 @@ class InferenceWorker:
         import datetime
         tz = datetime.timezone(datetime.timedelta(hours=7))
         current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
-        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time} (GMT+7, Hanoi/Jakarta)."
+        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
 
         try:
             for token in a._components.llm.generate_stream(
