@@ -95,9 +95,11 @@ class InferenceWorker:
                     a._state = AssistantState.WAKE_WORD_LISTENING
                     a._print_status()
                 elif a._wake_word:
-                    a._wake_word.extend_timeout()
-                    a._state = AssistantState.IDLE
-                    a._print_status("listening for follow-up, say 'goodbye' to end")
+                    a._wake_word.deactivate(with_cooldown=True)
+                    a._wake_word._state.cooldown = time.time() + 1.0
+                    a._wake_word._model.reset()
+                    a._state = AssistantState.WAKE_WORD_LISTENING
+                    a._print_status()
                 else:
                     a._state = AssistantState.IDLE
 

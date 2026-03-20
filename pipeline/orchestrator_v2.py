@@ -280,9 +280,9 @@ class VoiceAssistant:
                     if gain != 1.0:
                         chunk = np.clip(chunk * gain, -1.0, 1.0).astype(np.float32)
 
-                    # 4. Skip if TTS is playing (keep reading to drain buffer)
+                    # 4. Skip if TTS is playing or Assistant is busy
                     now = time.time()
-                    if now < self._muted_until:
+                    if now < self._muted_until or self._state in (AssistantState.PROCESSING, AssistantState.SPEAKING):
                         self._was_muted = True
                         continue
 
