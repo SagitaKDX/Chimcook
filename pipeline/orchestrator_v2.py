@@ -83,7 +83,7 @@ class VoiceAssistant:
 
         # ── Inter-thread queues ──────────────────────────────────────────────
         self._face_event_q: queue.Queue = queue.Queue(maxsize=4)
-        self._speech_q: queue.Queue = queue.Queue(maxsize=1)
+        self._speech_q: queue.Queue = queue.Queue(maxsize=0)  # Infinite queue
 
         # ── Component init ───────────────────────────────────────────────────
         self._components = ComponentManager(config)

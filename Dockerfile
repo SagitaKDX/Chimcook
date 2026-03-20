@@ -119,4 +119,4 @@ RUN sed -i 's|^LLM_MODEL_PATH=.*|LLM_MODEL_PATH=models/llm/qwen2.5-3b-instruct-q
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-ENTRYPOINT ["python", "-m", "pipeline.orchestrator_v2"]
+ENTRYPOINT ["python", "pipeline/orchestrator_v2.py"]
