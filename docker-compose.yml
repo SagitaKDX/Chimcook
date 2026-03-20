@@ -32,8 +32,8 @@ services:
       - PULSE_COOKIE=/root/.config/pulse/cookie
       - XDG_RUNTIME_DIR=/run/user/1000
       - AUDIO_DEVICE=${AUDIO_DEVICE:-}
-      - DEBUG=${DEBUG:-false}
-      - SAVE_AUDIO=${SAVE_AUDIO:-false}
+      - DEBUG=${DEBUG:-1}        # 1 = show per-frame VAD prob bars; set to 0 to disable
+      - SAVE_AUDIO=${SAVE_AUDIO:-0}
 
     # Network not needed (fully offline)
     network_mode: none
