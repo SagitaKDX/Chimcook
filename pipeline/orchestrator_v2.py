@@ -634,7 +634,7 @@ def main() -> None:
         require_face_for_wake_word=True,
         greet_on_face=True,
         track_talking=True,
-        wake_word_threshold=0.25,
+        wake_word_threshold=0.75,
         wake_word_timeout_sec=30.0,
         wake_word_cooldown_sec=1.0,
         silence_timeout_ms=1000,
