@@ -155,9 +155,18 @@ class ComponentManager:
     
     def _init_stt(self) -> None:
         """Initialize speech-to-text."""
-        print("[5/8] Speech-to-Text (distil-large-v3)...")
-        from core.stt import STT, STTConfigForAccents
-        self.stt = STT(STTConfigForAccents())
+        print("[5/8] Speech-to-Text (tiny.en — fast mode)...")
+        from core.stt import STT, STTConfig
+        self.stt = STT(STTConfig(
+            model_size="base.en",     # Better accuracy, still fast (~500MB)
+            compute_type="int8",      # Fastest CPU quantisation
+            beam_size=1,              # Greedy decode — fastest
+            best_of=1,
+            temperature=0.0,
+            cpu_threads=4,
+            enhance_audio=False,      # Skip enhancement overhead
+            correct_text=False,       # Skip post-process overhead
+        ))
     
     def _init_llm(self) -> None:
         """Initialize language model."""
@@ -171,8 +180,8 @@ class ComponentManager:
         self.llm = LLM(LLMConfig(
             model_path=model_path,
             n_ctx=2048,
-            n_threads=4,
-            max_tokens=150,
+            n_threads=6,        # More threads = faster token generation
+            max_tokens=80,      # Shorter replies = faster first TTS byte
         ))
     
     def _find_llm_model(self) -> str:

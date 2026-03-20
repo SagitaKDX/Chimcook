@@ -156,7 +156,7 @@ class VisionWorker:
     def _send_greeting(self, now: float) -> None:
         """Synthesise and play the Phase-2 greeting."""
         a = self._assistant
-        greeting = "Hello there! Just say the wake word when you're ready to talk."
+        greeting = "Hello! Say Alexa when you're ready to talk."
         print(f"[VERIFY: GREET_SENT] 👋 {greeting}")
         a._last_greeting_time = now
         a._state = AssistantState.SPEAKING
@@ -175,7 +175,7 @@ class VisionWorker:
             if a.config.enable_wake_word
             else AssistantState.IDLE
         )
-        a._print_status("say wake word to begin")
+        a._print_status("say Alexa to begin")
 
     def _handle_face_lost(self, now: float) -> None:
         """Apply soft-gone / hard-gone logic when no face is detected."""
