@@ -201,6 +201,7 @@ class VisionWorker:
             a._is_user_present = False
             a._wake_word_soft_locked = False
             a._last_face_seen = 0.0
+            a._last_greeting_time = 0.0  # Reset greeting cooldown so it welcomes them back
             if a._wake_word and a._wake_word.is_active:
                 a._wake_word.deactivate(with_cooldown=False)
             a._speech.clear_history()
