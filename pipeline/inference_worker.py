@@ -95,11 +95,9 @@ class InferenceWorker:
                     a._state = AssistantState.WAKE_WORD_LISTENING
                     a._print_status()
                 elif a._wake_word:
-                    a._wake_word.deactivate(with_cooldown=True)
-                    a._wake_word._state.cooldown = time.time() + 1.0
-                    a._wake_word._model.reset()
-                    a._state = AssistantState.WAKE_WORD_LISTENING
-                    a._print_status()
+                    a._wake_word.extend_timeout()
+                    a._state = AssistantState.IDLE
+                    a._print_status("listening for follow-up, say 'goodbye' to end")
                 else:
                     a._state = AssistantState.IDLE
 
@@ -170,11 +168,16 @@ class InferenceWorker:
 
         history_for_llm = a._speech._conversation_history[:-1]
 
+        import datetime
+        tz = datetime.timezone(datetime.timedelta(hours=7))
+        current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
+        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time} (GMT+7, Hanoi/Jakarta)."
+
         try:
             for token in a._components.llm.generate_stream(
                 text,
                 history=history_for_llm,
-                system_prompt=a.config.system_prompt,
+                system_prompt=dynamic_prompt,
             ):
                 sentence_buf += token
                 full_response.append(token)
