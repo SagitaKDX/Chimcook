@@ -1,109 +1,94 @@
 """
-Voice Assistant v2 - Main Orchestrator
-======================================
+Voice Assistant v2 - Main Orchestrator (Refactored)
+===================================================
 
-Simplified orchestrator using DIRECT Silero VAD for reliable speech detection.
+Three-thread architecture for maximum responsiveness:
 
-Pipeline:
-1. Wake word detection (if enabled)
-2. Silero VAD detects speech start → start recording
-3. Silero VAD detects silence → stop recording
-4. noisereduce cleans the captured audio
-5. Send cleaned audio to STT → LLM → TTS
+  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+  │  Vision Worker   │     │  Audio Thread    │     │  Inference Worker    │
+  │  (Phase 1 & 2)   │────▶│  (Phase 3 & 4)  │────▶│  (Phase 5)            │
+  └──────────────────┘     └──────────────────┘     └──────────────────────┘
+         face_event_q              speech_q
 
-This file contains only the main loop logic.
+State-Machine 5-Phase Verification:
+  Phase 1: FACE_STABLE  - face stable ≥ 3 consecutive frames
+  Phase 2: GREET_SENT   - greeting when IDLE + cooldown expired
+  Phase 3: WW_TRIGGERED - wake word gated by _is_user_present
+  Phase 4: MIC_ACTIVE   - earcon ping at VAD speech start
+  Phase 5: PROC_COMPLETE- LLM streaming + TTS first-byte-out complete
 """
 
-from typing import List, Optional
-import numpy as np
-import time
-import sys
-import signal
-import threading
-from collections import deque
-from pathlib import Path
-import json
+from __future__ import annotations
 
-# Add project root to path for direct script execution
+import queue
+import signal
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+import torch
+
+# ---------------------------------------------------------------------------
+# Project path setup
+# ---------------------------------------------------------------------------
 _project_root = Path(__file__).parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-# Add pipeline folder to path for local imports
 _pipeline_dir = Path(__file__).parent
 if str(_pipeline_dir) not in sys.path:
     sys.path.insert(0, str(_pipeline_dir))
 
-import torch
-
-# Import from pipeline folder (use explicit path to avoid conflict with config/ folder)
 from pipeline.config import (
-    VoiceAssistantConfig, 
-    AssistantState, 
+    AssistantState,
     STATE_DISPLAY,
+    VoiceAssistantConfig,
     get_wake_phrase,
 )
+from pipeline.constants import (
+    CHUNK_MS,
+    FRAME_MS,
+    MIN_SPEECH_FRAMES,
+    SAMPLE_RATE,
+    SESSION_DURATION_SEC,
+    SILENCE_FRAMES,
+    SILERO_THRESHOLD,
+    STOP_SENTINEL,
+)
 from pipeline.components import ComponentManager
-from pipeline.wake_word_handler import WakeWordHandler
+from pipeline.debug_log import agent_log
 from pipeline.speech_processor import SpeechProcessor
+from pipeline.tts_stream import load_earcon_from_assets
+from pipeline.wake_word_handler import WakeWordHandler
 
-# Debug logging (NDJSON) for VAD visualization
-DEBUG_LOG_PATH = _project_root / ".cursor" / "debug-b7d16a.log"
-
-
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict, run_id: str = "vad-meter") -> None:
-    """Append one NDJSON log line for this debug session."""
-    try:
-        # Ensure debug directory exists
-        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "sessionId": "b7d16a",
-            "id": f"log_{int(time.time() * 1000)}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-        }
-        with DEBUG_LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        # Logging must never break the app
-        pass
-
-# =============================================================================
-# SILERO VAD CONFIGURATION
-# =============================================================================
-SAMPLE_RATE = 16000
-FRAME_MS = 32  # Silero works best with 32ms frames (512 samples at 16kHz)
-SILERO_THRESHOLD = 0.45  # Speech probability threshold (lower = more sensitive)
-SILENCE_TIMEOUT_MS = 1000  # End speech after this much silence (was 600)
-MIN_SPEECH_MS = 200  # Minimum speech duration to process (was 300)
-
+# Modular workers
+from pipeline.vision_worker import VisionWorker
+from pipeline.inference_worker import InferenceWorker
 
 
 class VoiceAssistant:
     """
-    Main voice assistant orchestrator.
-    
-    Usage:
-        config = VoiceAssistantConfig()
-        assistant = VoiceAssistant(config)
-        assistant.run()  # Blocking main loop
+    Refactored main orchestrator.
+    Manages the audio loop (Phase 3 & 4) and delegates to VisionWorker
+    and InferenceWorker via thread-safe queues.
     """
-    
-    def __init__(self, config: VoiceAssistantConfig):
+
+    def __init__(self, config: VoiceAssistantConfig) -> None:
         self.config = config
         self._state = AssistantState.IDLE
         self._running = False
         self._muted_until = 0.0
-        
-        # Initialize all components
+
+        # ── Inter-thread queues ──────────────────────────────────────────────
+        self._face_event_q: queue.Queue = queue.Queue(maxsize=4)
+        self._speech_q: queue.Queue = queue.Queue(maxsize=1)
+
+        # ── Component init ───────────────────────────────────────────────────
         self._components = ComponentManager(config)
         self._components.initialize_all()
-        
-        # Create wake word handler
+
         if config.enable_wake_word and self._components.wake_word_model:
             self._wake_word = WakeWordHandler(
                 config,
@@ -112,8 +97,7 @@ class VoiceAssistant:
             )
         else:
             self._wake_word = None
-        
-        # Create speech processor
+
         self._speech = SpeechProcessor(
             config,
             self._components.stt,
@@ -121,132 +105,121 @@ class VoiceAssistant:
             self._components.tts,
             self._components.audio_output,
         )
-        
-        # Face / presence state (handled in background thread)
+
+        # ── Presence / face state (shared with VisionWorker) ─────────────────
         self._is_user_present = False
         self._last_face_seen = 0.0
-        # Greeting/session timing
         self._last_greeting_time = 0.0
-        self._greet_cooldown_sec = 30.0 * 60.0  # 30 minutes between greetings
-        self._soft_gone_sec = 5.0               # soft gone: temporarily lock wake word
-        self._hard_gone_timeout_sec = 2.0 * 60.0  # hard gone: reset after 2 minutes away
         self._wake_word_soft_locked = False
-        self._session_duration = 30.0  # Seconds before allowing another greeting/session
-        self._face_thread_stop = threading.Event()
-        self._face_thread: Optional[threading.Thread] = None
-        
-        # Load Silero VAD directly (proven to work in test)
+        self._session_until = 0.0
+
+        # ── Workers ──────────────────────────────────────────────────────────
+        self._vision_worker = VisionWorker(self)
+        self._inference_worker = InferenceWorker(self)
+
+        # ── Silero VAD (loaded once, shared with audio thread) ───────────────
         print("[+] Loading Silero VAD...")
         self._silero_model, _ = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
-            model='silero_vad',
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
             force_reload=False,
-            trust_repo=True
+            trust_repo=True,
         )
         print("    ✓ Silero VAD loaded")
-        
-        # Timing parameters
-        self._frame_ms = FRAME_MS
-        self._frame_samples = SAMPLE_RATE * FRAME_MS // 1000  # 512 samples
-        self._silence_frames = SILENCE_TIMEOUT_MS // FRAME_MS  # ~19 frames
-        self._min_speech_frames = MIN_SPEECH_MS // FRAME_MS  # ~9 frames
+
         self._max_frames = int(config.max_speech_duration_sec * 1000 / FRAME_MS)
         
-        # Print instructions
+        # Load Phase-4 earcon pre-emptively
+        self._earcon_audio, self._earcon_sr = load_earcon_from_assets()
+
+        # Print startup info
         if config.enable_wake_word:
             phrase = get_wake_phrase(self._components.wake_word_name)
-            print(f"\nSay: \"{phrase}\" to activate")
+            print(f'\nSay: "{phrase}" to activate')
         print("Press Ctrl+C to stop.\n")
 
-        # Start face detection thread (decoupled) if enabled
-        if config.enable_face_detection and self._components.face_detector:
-            self._start_face_thread()
-    
+    # =========================================================================
+    # Public API
+    # =========================================================================
+
     def run(self) -> None:
-        """Main loop: continuously process audio and respond."""
+        """Main loop: audio capture → wake word → Silero VAD → speech_q."""
         self._running = True
-        
-        # Use 80ms frames (1280 samples) - works for wake word
-        # We'll process in smaller chunks for Silero VAD
-        import sounddevice as sd
+
         import scipy.signal
-        
-        CHUNK_MS = 80  # 80ms = 1280 samples - good for wake word
-        PROCESS_SR = SAMPLE_RATE  # all downstream expects 16k
-        
-        # Some USB mics (e.g. M70) reject 16k capture; prefer device default (often 48k) and resample.
+        import sounddevice as sd
+
+        PROCESS_SR = SAMPLE_RATE
+
+        # --- Determine input device sample rate ---
         input_device = self.config.audio_device
         input_sr = PROCESS_SR
-        input_channels = 1  # default mono; will be overridden if device needs more
+        input_channels = 1
         try:
             if input_device is not None:
                 dev = sd.query_devices(input_device)
-                dev_default_sr = int(dev.get("default_samplerate", 0) or 0) if isinstance(dev, dict) else 0
-                dev_max_ch = int(dev.get("max_input_channels", 0) or 0) if isinstance(dev, dict) else 0
-                # If device default is set and differs from 16k, use device default to avoid paInvalidSampleRate spam
-                if dev_default_sr and dev_default_sr != PROCESS_SR:
-                    input_sr = dev_default_sr
-                # If device has no input channels, it's output-only — warn and use default
-                if dev_max_ch == 0:
-                    print(f"⚠️  Device {input_device} has 0 input channels (output-only?). Falling back to default input device.")
-                    input_device = None
-                elif dev_max_ch > 0:
-                    # Use device's supported channel count (some devices reject channels=1)
-                    input_channels = dev_max_ch
+                if isinstance(dev, dict):
+                    dev_sr = int(dev.get("default_samplerate", 0) or 0)
+                    dev_ch = int(dev.get("max_input_channels", 0) or 0)
+                    if dev_sr and dev_sr != PROCESS_SR:
+                        input_sr = dev_sr
+                    if dev_ch == 0:
+                        print(f"⚠️  Device {input_device} has 0 input channels → using default")
+                        input_device = None
+                    elif dev_ch > 0:
+                        input_channels = dev_ch
         except Exception:
             pass
-        
+
         input_chunk_samples = int(input_sr * CHUNK_MS / 1000)
-        process_chunk_samples = int(PROCESS_SR * CHUNK_MS / 1000)  # 1280 @16k
-        
+        process_chunk_samples = int(PROCESS_SR * CHUNK_MS / 1000)
+
         def resample_to_16k(x: np.ndarray, sr_in: int) -> np.ndarray:
-            """High quality resample to 16k using polyphase."""
             if sr_in == PROCESS_SR:
                 y = x
             else:
-                y = scipy.signal.resample_poly(x, up=PROCESS_SR, down=sr_in).astype(np.float32)
-            # Ensure exact chunk length for wake word path
+                y = scipy.signal.resample_poly(x, PROCESS_SR, sr_in).astype(np.float32)
             if y.size != process_chunk_samples:
                 if y.size > process_chunk_samples:
                     y = y[:process_chunk_samples]
                 else:
                     y = np.pad(y, (0, process_chunk_samples - y.size))
             return y.astype(np.float32)
-        
-        # Setup graceful shutdown
+
         signal.signal(signal.SIGINT, lambda s, f: self._signal_handler())
-        
-        print("Silero VAD ready - no calibration needed!\n")
-        print(f"Using single audio stream: {CHUNK_MS}ms chunks (input_sr={input_sr}, process_sr={PROCESS_SR})")
-        
-        # Main loop state variables
-        collected_frames: List[np.ndarray] = []
-        is_recording = False
-        silence_frame_count = 0
-        raw_chunks_for_utterance: List[np.ndarray] = []  # raw mic during utterance (when save_audio)
-        
-        # Buffer for Silero (needs 512 samples = 32ms)
-        silero_buffer = np.zeros(0, dtype=np.float32)
-        
-        # Recordings directory for stage review (raw, VAD input, STT input)
-        recordings_dir = Path(_project_root) / "recordings"
-        if self.config.save_audio:
-            for sub in ("raw", "vad", "stt"):
-                (recordings_dir / sub).mkdir(parents=True, exist_ok=True)
-            print(f"Recordings: {recordings_dir}/ (raw, vad, stt)")
-        
-        # Initial state
+
+        # Start delegates
+        if self.config.enable_face_detection:
+            self._vision_worker.start()
+        self._inference_worker.start()
+
+        # --- Initial state ---
         if self.config.enable_wake_word:
             self._state = AssistantState.WAKE_WORD_LISTENING
         else:
             self._state = AssistantState.IDLE
             if self._wake_word:
                 self._wake_word.activate()
-        
         self._print_status()
-        
+
+        print(f"Silero VAD ready | Single stream {CHUNK_MS}ms chunks (in_sr={input_sr}, proc_sr={PROCESS_SR})\n")
+
+        # --- Recordings dir ---
+        recordings_dir = Path(_project_root) / "recordings"
+        if self.config.save_audio:
+            for sub in ("raw", "vad", "stt"):
+                (recordings_dir / sub).mkdir(parents=True, exist_ok=True)
+            print(f"Recordings: {recordings_dir}/")
+
+        # --- Main audio loop state ---
+        collected_frames: List[np.ndarray] = []
+        is_recording = False
+        silence_frame_count = 0
+        raw_chunks: List[np.ndarray] = []
+        silero_buffer = np.zeros(0, dtype=np.float32)
+
         try:
-            # Single audio stream with blocking reads
+            # --- Open audio stream (try multiple rates) ---
             def open_stream(sr: int, ch: int = input_channels):
                 return sd.InputStream(
                     samplerate=sr,
@@ -256,481 +229,283 @@ class VoiceAssistant:
                     blocksize=int(sr * CHUNK_MS / 1000),
                     latency="low",
                 )
-            
-            stream_cm = None
-            trial_rates = [16000, 48000, 44100]
+
+            trial_rates: List[int] = []
             if input_device is not None:
                 dev = sd.query_devices(input_device)
                 if isinstance(dev, dict) and "default_samplerate" in dev:
-                    trial_rates.insert(0, int(dev["default_samplerate"]))
-            
-            # Remove duplicates preserving order
-            unique_rates = []
-            for r in trial_rates:
-                if r not in unique_rates:
-                    unique_rates.append(r)
-            
+                    trial_rates.append(int(dev["default_samplerate"]))
+            for r in [16000, 48000, 44100]:
+                if r not in trial_rates:
+                    trial_rates.append(r)
+
+            stream_cm = None
             last_err = None
-            for rate in unique_rates:
+            for rate in trial_rates:
                 try:
                     stream_cm = open_stream(rate)
                     input_sr = rate
                     input_chunk_samples = int(input_sr * CHUNK_MS / 1000)
-                    break # Success!
+                    break
                 except Exception as e:
                     last_err = e
-                    continue
-            
+
             if stream_cm is None:
-                raise RuntimeError(f"Could not open audio input stream with any rate {unique_rates}. Last error: {last_err}")
-            
+                raise RuntimeError(
+                    f"Could not open audio stream with any of {trial_rates}. Last error: {last_err}"
+                )
+
             with stream_cm as stream:
-                print(f"Audio stream started (single stream for all, {input_channels}ch @ {input_sr}Hz)")
-                
+                print(f"Audio stream started ({input_channels}ch @ {input_sr}Hz)\n")
+
                 while self._running:
-                    # Blocking read - get one 80ms chunk
+                    # 1. Read chunk from mic
                     try:
                         audio_data, overflowed = stream.read(input_chunk_samples)
                     except Exception as e:
                         print(f"Audio read error: {e}")
                         continue
-                        
                     if overflowed:
                         continue
-                    
-                    # Convert to mono 1D float32 (take channel 0 if multi-channel)
+
+                    # 2. Convert to mono float32 + resample to 16kHz
                     if audio_data.ndim > 1 and audio_data.shape[1] > 1:
                         chunk_in = audio_data[:, 0].astype(np.float32)
                     else:
                         chunk_in = audio_data.flatten().astype(np.float32)
                     chunk = resample_to_16k(chunk_in, input_sr)
-                    # Apply mic gain boost at 16k stage (pre wakeword/VAD)
-                    if getattr(self.config, "mic_gain", 1.0) != 1.0:
-                        chunk = (chunk * float(self.config.mic_gain)).clip(-1.0, 1.0).astype(np.float32)
-                    
-                    # Skip processing if muted (TTS playing)
-                    # BUT KEEP READING to prevent buffer accumulation!
-                    # If we don't read, sounddevice caches the chunks (with TTS residue)
-                    # and bursts them all to the wake word model when mute expires.
-                    current_time = time.time()
-                    if current_time < self._muted_until:
+
+                    # 3. Mic gain
+                    gain = float(getattr(self.config, "mic_gain", 1.0))
+                    if gain != 1.0:
+                        chunk = np.clip(chunk * gain, -1.0, 1.0).astype(np.float32)
+
+                    # 4. Skip if TTS is playing (keep reading to drain buffer)
+                    now = time.time()
+                    if now < self._muted_until:
                         self._was_muted = True
                         continue
-                    
-                    # Just came out of mute → reset wake word model
-                    # to clear any residual activation from TTS leak
-                    if getattr(self, '_was_muted', False):
+
+                    if getattr(self, "_was_muted", False):
                         self._was_muted = False
                         if self._wake_word:
-                            self._wake_word.reset_full()
-                    
-                    # Face detection is now decoupled from the main audio pipeline.
-                    # Any camera/face issues will NOT stop wake word or VAD/STT flow.
-                    # Optional gating for wake word acceptance based on face presence
+                            self._wake_word._model.reset()
+
+                    # 5. Drain face events from vision thread (non-blocking)
+                    self._drain_face_events()
+
+                    # 6. Wake word gate (Phase 3 logic)
                     gate_allows_wake = True
-                    if self.config.require_face_for_wake_word and self._wake_word and not self._wake_word.is_active:
+                    if (
+                        self.config.require_face_for_wake_word
+                        and self._wake_word
+                        and not self._wake_word.is_active
+                    ):
                         gate_allows_wake = self._is_user_present
-                    
-                    # === WAKE WORD (uses full 80ms chunk) ===
-                    # Always process the frame to keep OpenWakeWord's internal buffer moving in real-time,
-                    # but tell it whether the face gate allows triggering right now.
-                    if not self._handle_wake_word(chunk, face_detected=gate_allows_wake):
-                        # Wake word isn't fully active yet (either listening, or heard but ignored due to no face)
+
+                    if not gate_allows_wake:
+                        self._was_gate_closed = True
+                        silero_buffer = np.concatenate([silero_buffer, chunk])
+                        continue
+
+                    if getattr(self, "_was_gate_closed", False):
+                        self._was_gate_closed = False
+                        if self._wake_word:
+                            self._wake_word._model.reset()
+
+                    # 7. Wake word processing
+                    if not self._handle_wake_word(chunk, face_detected=True):
                         collected_frames = []
-                        raw_chunks_for_utterance = []
+                        raw_chunks = []
                         is_recording = False
                         silence_frame_count = 0
                         silero_buffer = np.zeros(0, dtype=np.float32)
                         continue
-                    
-                    # Check wake word timeout
+
+                    # 8. Wake word timeout
                     if self._check_wake_word_timeout():
-                        if is_recording and len(collected_frames) > 0:
-                            print(f"\n⏰ Processing speech before timeout...")
-                            self._process_collected_speech(collected_frames, raw_chunks_for_utterance, recordings_dir)
+                        if is_recording and collected_frames:
+                            print("\n⏰ Processing speech before timeout...")
+                            self._enqueue_speech(collected_frames, raw_chunks, recordings_dir)
                         collected_frames = []
-                        raw_chunks_for_utterance = []
+                        raw_chunks = []
                         is_recording = False
                         silence_frame_count = 0
                         silero_buffer = np.zeros(0, dtype=np.float32)
                         continue
-                    
-                    # Accumulate raw mic for stage recording (when save_audio)
+
+                    # 9. Accumulate raw mic
                     if is_recording and self.config.save_audio:
-                        raw_chunks_for_utterance.append(chunk.copy())
-                    
-                    # === SILERO VAD (needs 512 sample chunks) ===
-                    # Add chunk to silero buffer and process in 512-sample pieces
+                        raw_chunks.append(chunk.copy())
+
+                    # 10. Silero VAD (512-sample frames)
                     silero_buffer = np.concatenate([silero_buffer, chunk])
-                    
+
                     while len(silero_buffer) >= 512:
                         frame_512 = silero_buffer[:512].copy()
                         silero_buffer = silero_buffer[512:]
-                        
+
                         speech_prob = self._silero_vad_predict(frame_512)
                         is_speech = speech_prob >= SILERO_THRESHOLD
 
-                        # VAD volume visualization & logging when debug enabled
+                        # Debug VAD logging
                         if self.config.debug:
                             rms = float(np.sqrt(np.mean(frame_512.astype(np.float64) ** 2)))
                             bar_len = min(30, int(rms * 200))
                             bar = "█" * bar_len + "░" * (30 - bar_len)
                             label = "SPEECH" if is_speech else "silence"
-                            prob_pct = int(speech_prob * 100)
-                            # Simple console meter (overwrites same line)
-                            print(f"\r  {label:8}  prob={prob_pct:3}%  [{bar}]  rms={rms:.4f}  ", end="", flush=True)
-                            # #region agent log
-                            _agent_log(
-                                hypothesis_id="VAD_LEVEL",
-                                location="pipeline/orchestrator_v2.py:VAD_LOOP",
-                                message="vad_level",
-                                data={"rms": rms, "speech_prob": float(speech_prob), "is_speech": bool(is_speech)},
+                            print(
+                                f"\r  {label:8}  prob={int(speech_prob*100):3}%  [{bar}]",
+                                end="",
+                                flush=True,
                             )
-                            # #endregion
-                        
-                        # === SPEECH COLLECTION ===
+                            agent_log(
+                                "VAD_LEVEL",
+                                "pipeline/orchestrator_v2.py:VAD_LOOP",
+                                "vad_level",
+                                {
+                                    "rms": rms,
+                                    "speech_prob": float(speech_prob),
+                                    "is_speech": bool(is_speech),
+                                },
+                            )
+
+                        # ── Speech collection ──────────────────────────────
                         if is_speech:
                             if self._wake_word:
                                 self._wake_word.extend_timeout()
-                            
+
                             if not is_recording:
+                                # Phase 4: MIC_ACTIVE — play earcon on speech start
                                 is_recording = True
                                 silence_frame_count = 0
                                 collected_frames = [frame_512]
                                 if self.config.save_audio:
-                                    raw_chunks_for_utterance.append(chunk.copy())
-                                print(f"\r🎤 Listening...", end="", flush=True)
+                                    raw_chunks.append(chunk.copy())
+                                
+                                self._components.audio_output.play(
+                                    self._earcon_audio, self._earcon_sr
+                                )
+                                print(f"\r[VERIFY: MIC_ACTIVE] 🎤 Listening...", end="", flush=True)
                             else:
                                 collected_frames.append(frame_512)
                             silence_frame_count = 0
-                            
+
                             if len(collected_frames) >= self._max_frames:
-                                print(f"\n⚠️ Max duration")
-                                self._process_collected_speech(collected_frames, raw_chunks_for_utterance, recordings_dir)
+                                print("\n⚠️ Max duration reached")
+                                self._enqueue_speech(collected_frames, raw_chunks, recordings_dir)
                                 collected_frames = []
-                                raw_chunks_for_utterance = []
+                                raw_chunks = []
                                 is_recording = False
                                 silence_frame_count = 0
                                 self._silero_model.reset_states()
-                        
+
                         elif is_recording:
                             collected_frames.append(frame_512)
                             silence_frame_count += 1
-                            
-                            if silence_frame_count >= self._silence_frames:
+
+                            if silence_frame_count >= SILENCE_FRAMES:
                                 is_recording = False
-                                
                                 speech_frames = len(collected_frames) - silence_frame_count
-                                if speech_frames >= self._min_speech_frames:
+
+                                if speech_frames >= MIN_SPEECH_FRAMES:
                                     print()
-                                    
-                                    # Play thinking chime so user knows AI heard them
-                                    chime_mute = self._speech.play_thinking_chime()
-                                    if chime_mute > self._muted_until:
-                                        self._muted_until = chime_mute
-                                    
-                                    should_end = self._process_collected_speech(collected_frames, raw_chunks_for_utterance, recordings_dir)
-                                    
-                                    raw_chunks_for_utterance = []
-                                    if should_end:
-                                        # Full session reset on goodbye
-                                        self._speech.clear_history()
-                                        self._wake_word_soft_locked = False
-                                        if self._wake_word:
-                                            self._wake_word.deactivate(with_cooldown=True)
-                                            # Hard 8-second cooldown from NOW
-                                            # (covers TTS playback + audio buffer flush)
-                                            self._wake_word._state.cooldown = time.time() + 8.0
-                                            self._wake_word.reset_full()
-                                        self._state = AssistantState.WAKE_WORD_LISTENING
-                                        self._print_status()
-                                    elif self._wake_word:
-                                        self._wake_word.extend_timeout()
-                                        self._state = AssistantState.IDLE
-                                        self._print_status("listening for follow-up, say 'goodbye' to end")
-                                    else:
-                                        self._state = AssistantState.IDLE
-                                
+                                    try:
+                                        self._enqueue_speech(
+                                            collected_frames, raw_chunks, recordings_dir
+                                        )
+                                    except queue.Full:
+                                        print("⚠️  Inference queue full – dropping utterance")
+
                                 collected_frames = []
-                                raw_chunks_for_utterance = []
+                                raw_chunks = []
                                 silence_frame_count = 0
                                 self._silero_model.reset_states()
-        
+
         finally:
+            self.stop()
+            self._vision_worker.stop()
+            self._inference_worker.stop()
             if self._wake_word:
                 self._wake_word.stop()
             self._components.stop()
-    
-    def _signal_handler(self) -> None:
-        """Handle interrupt signal."""
-        print("\n\nReceived interrupt signal...")
-        self._running = False
-    
-    def _start_face_thread(self) -> None:
-        """Start background face detection thread for presence tracking."""
-        if self._face_thread is not None:
-            return
-        def loop():
-            detector = self._components.face_detector
-            if not detector:
-                return
-            interval = max(0.1, self.config.face_detection_interval_ms / 1000.0)
-            while not self._face_thread_stop.is_set():
-                try:
-                    result = detector.process_frame()
-                    now = time.time()
-                    if result.face_count >= 1:
-                        # Face detected
-                        if not self._is_user_present and self.config.debug:
-                            print("[FaceThread] User present")
 
-                        # Auto-resume: if user was soft-locked (had active session)
-                        # and comes back, re-activate wake word immediately
-                        was_soft_locked = self._wake_word_soft_locked
-                        self._is_user_present = True
-                        self._wake_word_soft_locked = False
-                        self._last_face_seen = now
+    # =========================================================================
+    # Helpers
+    # =========================================================================
 
-                        if was_soft_locked and self._wake_word and not self._wake_word.is_active:
-                            print("\n🔄 Welcome back! Resuming conversation...")
-                            self._wake_word.activate()
-                            self._wake_word.extend_timeout()
-                            self._state = AssistantState.IDLE
-                            self._print_status("listening for your question...")
+    def _drain_face_events(self) -> None:
+        """Non-blocking drain of face event queue (called from audio thread)."""
+        try:
+            while True:
+                self._face_event_q.get_nowait()
+        except queue.Empty:
+            pass
 
-                        # Greet only if cooldown has passed and assistant is idle
-                        elif (
-                            self.config.greet_on_face
-                            and (now - self._last_greeting_time) > self._greet_cooldown_sec
-                            and (self._wake_word is None or not self._wake_word.is_active)
-                            and self._state in (AssistantState.IDLE, AssistantState.WAKE_WORD_LISTENING)
-                        ):
-                            greeting = "Hello there! Just say the wake word when you're ready to talk."
-                            print(f"\n👋 {greeting}")
-                            self._last_greeting_time = now
-                            self._state = AssistantState.SPEAKING
-                            # Synthesize FIRST, then pre-set mute BEFORE playing
-                            # (face thread runs concurrently with main audio loop -
-                            #  if we mute AFTER play(), the main loop processes
-                            #  speaker audio during playback → wake word self-triggers)
-                            audio, sr = self._speech._tts.synthesize(greeting)
-                            audio_duration = len(audio) / sr
-                            self._muted_until = time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
-                            if self._wake_word:
-                                self._wake_word._state.cooldown = self._muted_until + 0.5
-                                self._wake_word.reset_full()
-                            # Tell main loop we're muted so it does its own reset when mute expires
-                            self._was_muted = True
-                            # NOW play (safe - mute is already set)
-                            self._speech._audio_output.play(audio, sr)
-                            # After playback: reset AGAIN to flush any TTS reverb/echo
-                            # that leaked through mic into preprocessor during playback
-                            if self._wake_word:
-                                self._wake_word.reset_full()
-                            self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
-                            self._print_status("say wake word to begin")
-                    else:
-                        # No face detected - check soft/hard gone timings
-                        if self._is_user_present and self._last_face_seen > 0:
-                            elapsed = now - self._last_face_seen
-                            # Soft gone: temporarily lock wake word but keep session/history
-                            if elapsed > self._soft_gone_sec and not self._wake_word_soft_locked:
-                                # Only soft-lock if there is an active wake word session
-                                # (mid-conversation). If no session, just let the pipeline
-                                # keep listening for wake word normally.
-                                if self._wake_word and self._wake_word.is_active:
-                                    self._wake_word_soft_locked = True
-                                    if self.config.debug:
-                                        print("[FaceThread] Soft gone - temporarily locking wake word (active session)")
-                                else:
-                                    if self.config.debug:
-                                        print("[FaceThread] Soft gone - no active session, staying in listen mode")
-                            # Hard gone: user left for a long time, reset session
-                            if elapsed > self._hard_gone_timeout_sec:
-                                if self.config.debug:
-                                    print("[FaceThread] Hard gone - resetting session")
-                                self._is_user_present = False
-                                self._wake_word_soft_locked = False
-                                self._last_face_seen = 0.0
-                                # Reset conversation/session state
-                                if self._wake_word and self._wake_word.is_active:
-                                    self._wake_word.deactivate(with_cooldown=False)
-                                self._speech.clear_history()
-                                self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
-                                self._session_until = 0.0
-                    time.sleep(interval)
-                except Exception as e:
-                    if self.config.debug:
-                        print(f"[FaceThread] Error: {e}")
-                    time.sleep(1.0)
-        self._face_thread = threading.Thread(target=loop, daemon=True)
-        self._face_thread.start()
-    
+    def _enqueue_speech(
+        self,
+        frames: List[np.ndarray],
+        raw_chunks: List[np.ndarray],
+        recordings_dir: Optional[Path],
+    ) -> None:
+        """Put collected speech onto inference queue."""
+        record_ts = int(time.time() * 1000)
+        item = (list(frames), list(raw_chunks), recordings_dir, record_ts)
+        self._speech_q.put_nowait(item)
+        
+        # Play thinking phrase so user knows we heard them
+        chime_until = self._speech.play_thinking_chime()
+        if chime_until > self._muted_until:
+            self._muted_until = chime_until
+
     def _silero_vad_predict(self, frame: np.ndarray) -> float:
-        """
-        Get speech probability from Silero VAD.
-        
-        Args:
-            frame: float32 audio, should be 512 samples for 16kHz
-            
-        Returns:
-            Speech probability (0.0 to 1.0)
-        """
-        # Silero expects 512 samples at 16kHz (32ms)
+        """Return speech probability [0, 1] for a 512-sample frame."""
         if len(frame) != 512:
-            if len(frame) < 512:
-                frame = np.pad(frame, (0, 512 - len(frame)))
-            else:
-                frame = frame[:512]
-        
-        # Ensure float32
+            frame = np.pad(frame, (0, max(0, 512 - len(frame)))) if len(frame) < 512 else frame[:512]
         if frame.dtype != np.float32:
             frame = frame.astype(np.float32)
-        
-        # Convert to tensor
-        audio_tensor = torch.from_numpy(frame).float()
-        
-        # Get prediction
+        tensor = torch.from_numpy(frame).float()
         with torch.no_grad():
-            speech_prob = self._silero_model(audio_tensor.unsqueeze(0), SAMPLE_RATE).item()
-        
-        return speech_prob
+            return float(self._silero_model(tensor.unsqueeze(0), SAMPLE_RATE).item())
 
-    def _handle_face_detection(self) -> bool:
-        """Handle face detection and greeting. Returns True if face detected. Updates face window for wake word."""
-        if not self._components.face_detector:
-            return True  # No face detection = always "detected"
-        
-        # Only check face every 500ms to avoid slowing down audio loop
-        now = time.time()
-        if not hasattr(self, '_last_face_check'):
-            self._last_face_check = 0
-            self._cached_face_detected = False
-        
-        if now - self._last_face_check < 0.5:
-            # Use cached result
-            return self._cached_face_detected
-        
-        self._last_face_check = now
-        
-        face_result = self._components.face_detector.process_frame()
-        # One or more faces = face detected (opens face window)
-        face_detected = face_result.face_count >= 1
-        self._cached_face_detected = face_detected
-        
-        if self.config.debug:
-            if not hasattr(self, '_last_face_debug') or now - self._last_face_debug >= 2.0:
-                self._last_face_debug = now
-                print(f"[DEBUG] face_detection: face_count={face_result.face_count} face_detected={face_detected} window_until={self._face_window_until:.1f}")
-        
-        # When face detected, extend the window during which wake word is accepted
-        if face_detected:
-            self._face_window_until = now + self.config.face_window_sec
-            self._face_gone_since = 0.0  # Reset "face gone" timer
-        else:
-            # Track when face disappeared
-            if self._face_gone_since == 0.0 and self._last_face_count > 0:
-                self._face_gone_since = now
-        
-        # Check if we should greet
-        # Conditions to greet:
-        # 1. Face is detected
-        # 2. Haven't greeted yet (or session expired and face was gone for a while)
-        # 3. greet_on_face is enabled
-        # 4. NOT during active wake word session (don't interrupt conversation)
-        # 5. NOT during LISTENING/PROCESSING/SPEAKING states
-        can_greet = (
-            face_detected
-            and self.config.greet_on_face
-            and not self._face_greeted
-            and (self._wake_word is None or not self._wake_word.is_active)
-            and self._state in (AssistantState.IDLE, AssistantState.WAKE_WORD_LISTENING)
-        )
-        
-        if can_greet:
-            self._face_greeted = True
-            self._session_until = now + self._session_duration  # Start 30s session
-            greeting = "Hello there, I am Alexa. Say my name to listen to the command."
-            print(f"\n👋 {greeting}")
-            
-            self._state = AssistantState.SPEAKING
-            self._muted_until = self._speech.say(greeting)
-            self._state = AssistantState.WAKE_WORD_LISTENING if self.config.enable_wake_word else AssistantState.IDLE
-            self._print_status("say wake word to begin")
-        
-        # Reset greeting only when:
-        # 1. Session has expired (30s passed since last greeting)
-        # 2. Face has been gone for at least 3 seconds
-        session_expired = now > self._session_until
-        face_gone_long_enough = self._face_gone_since > 0 and (now - self._face_gone_since) > 3.0
-        
-        if session_expired and face_gone_long_enough:
-            if self._face_greeted:
-                self._face_greeted = False
-                if self.config.debug:
-                    print("\n(Session expired and face gone, ready to greet again)")
-        
-        self._last_face_count = face_result.face_count
-        return face_detected
-    
     def _handle_wake_word(self, frame: np.ndarray, face_detected: bool) -> bool:
         """
-        Handle wake word detection.
-        
-        Returns True if wake word is active (should collect speech).
+        Phase 3: WW_TRIGGERED log emitted on detection.
         """
         if not self._wake_word:
-            return True  # No wake word = always active
-        
+            return True
         if self._wake_word.is_active:
-            return True  # Already active
-        
-        # Check for wake word
+            return True
+
         score = self._wake_word.process_frame(frame, face_detected)
-        
         if score is not None:
-            print(f"\n✨ Wake word detected! (confidence: {score:.2f})")
+            print(f"\n[VERIFY: WW_TRIGGERED] ✨ Wake word detected! (confidence: {score:.2f})")
             self._wake_word.activate()
-            
-            # Extend session to prevent greeting during conversation
-            self._session_until = time.time() + self._session_duration
-            
-            # Play acknowledgment
+            self._session_until = time.time() + SESSION_DURATION_SEC
             self._state = AssistantState.SPEAKING
             self._muted_until = self._speech.play_acknowledgment()
-            
             self._state = AssistantState.IDLE
             self._print_status("listening for your question...")
             return True
-        
-        return False  # Wake word not detected
-    
+        return False
+
     def _check_wake_word_timeout(self) -> bool:
-        """Check and handle wake word timeout. Returns True if timed out."""
         if not self._wake_word or not self._wake_word.is_active:
             return False
-        
         if self._wake_word.check_timeout():
             print("\n⏰ Wake word timeout. Going back to sleep...")
-            self._wake_word.deactivate(with_cooldown=True)  # Enable cooldown
-            # Extend cooldown to let OpenWakeWord internal state decay
-            # (residual activation can cause immediate re-trigger)
+            self._wake_word.deactivate(with_cooldown=True)
             self._wake_word._state.cooldown = max(
                 self._wake_word._state.cooldown,
                 time.time() + 3.0,
             )
-            # Clear soft-lock so face thread doesn't falsely auto-resume
             self._wake_word_soft_locked = False
             self._state = AssistantState.WAKE_WORD_LISTENING
             self._print_status()
-            
-            # Reset Silero VAD state
             self._silero_model.reset_states()
-            
             return True
-        
         return False
-    
+
     def _save_stage_recordings(
         self,
         record_ts: int,
@@ -738,97 +513,58 @@ class VoiceAssistant:
         collected_frames: List[np.ndarray],
         recordings_dir: Path,
     ) -> None:
-        """Save per-stage recordings: raw mic, VAD segment, for review."""
-        import wave
+        import wave as _wave
         sr = SAMPLE_RATE
-        def write_wav(path: Path, audio: np.ndarray) -> None:
+
+        def _write(path: Path, audio: np.ndarray) -> None:
             audio = np.asarray(audio, dtype=np.float32).flatten()
-            if audio.size == 0:
+            if not audio.size:
                 return
-            p = path.parent
-            p.mkdir(parents=True, exist_ok=True)
-            with wave.open(str(path), "wb") as f:
-                f.setnchannels(1)
-                f.setsampwidth(2)
-                f.setframerate(sr)
-                f.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
-        # 1. Raw mic (chunks that corresponded to this utterance)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
+
         if raw_chunks:
-            raw_audio = np.concatenate([c.flatten().astype(np.float32) for c in raw_chunks])
-            write_wav(recordings_dir / "raw" / f"{record_ts}.wav", raw_audio)
-        # 2. VAD segment (512-sample frames that were sent to STT pipeline)
-        if collected_frames:
-            vad_audio = np.concatenate([f.flatten().astype(np.float32) for f in collected_frames])
-            write_wav(recordings_dir / "vad" / f"{record_ts}.wav", vad_audio)
-    
-    def _process_collected_speech(
-        self,
-        collected_frames: List[np.ndarray],
-        raw_chunks_for_utterance: Optional[List[np.ndarray]] = None,
-        recordings_dir: Optional[Path] = None,
-    ) -> bool:
-        """
-        Process collected speech through STT → LLM → TTS.
-        Optionally save per-stage recordings (raw, VAD, STT) when save_audio and recordings_dir provided.
-        
-        Returns True if conversation should end.
-        """
-        self._state = AssistantState.PROCESSING
-        print(f"\rStatus: {STATE_DISPLAY[self._state]}...")
-        
-        record_ts = int(time.time() * 1000)
-        if self.config.save_audio and recordings_dir is not None:
-            self._save_stage_recordings(
-                record_ts,
-                raw_chunks_for_utterance or [],
-                collected_frames,
-                recordings_dir,
+            _write(
+                recordings_dir / "raw" / f"{record_ts}.wav",
+                np.concatenate([c.flatten().astype(np.float32) for c in raw_chunks]),
             )
-        
-        # Pass frames to speech processor (record_ts so it can save STT-prepared to recordings/stt)
-        should_end, mute_until = self._speech.process(collected_frames, record_ts=record_ts if self.config.save_audio else None)
-        
-        if mute_until > 0:
-            self._muted_until = mute_until
-        
-        # Extend session to prevent greeting during conversation
-        self._session_until = time.time() + self._session_duration
-        
-        self._state = AssistantState.IDLE
-        
-        return should_end
-    
+        if collected_frames:
+            _write(
+                recordings_dir / "vad" / f"{record_ts}.wav",
+                np.concatenate([f.flatten().astype(np.float32) for f in collected_frames]),
+            )
+
+    # =========================================================================
+    # Utility / status
+    # =========================================================================
+
     def _print_status(self, extra: str = "") -> None:
-        """Print current status."""
         status = f"Status: {STATE_DISPLAY[self._state]}"
         if extra:
             status += f" ({extra})"
         print(status)
-    
-    def stop(self) -> None:
-        """Stop the assistant."""
+
+    def _signal_handler(self) -> None:
+        print("\n\nReceived interrupt signal...")
         self._running = False
-        if self._wake_word:
-            self._wake_word.stop()
-        self._components.stop()
-        # Stop face thread
-        if hasattr(self, "_face_thread_stop"):
-            self._face_thread_stop.set()
-        if getattr(self, "_face_thread", None) is not None:
-            self._face_thread.join(timeout=1.0)
-    
+
+    def stop(self) -> None:
+        self._running = False
+        self._speech_q.put(STOP_SENTINEL)
+
     @property
     def state(self) -> AssistantState:
-        """Current state."""
         return self._state
-    
+
     @property
     def history(self) -> list:
-        """Conversation history."""
         return self._speech.history
-    
+
     def clear_history(self) -> None:
-        """Clear conversation history."""
         self._speech.clear_history()
 
 
@@ -837,28 +573,18 @@ class VoiceAssistant:
 # =============================================================================
 
 def _find_preferred_input_device() -> "int | None":
-    """Auto-detect the best input device by name preference.
-
-    Priority order:
-      1. AUDIO_DEVICE env var (manual override, e.g. AUDIO_DEVICE=3)
-      2. Device whose name contains "M70"
-      3. Device whose name contains "MB50"
-      4. None → sounddevice will use the system default input device
-    """
     import os
     import sounddevice as sd
 
-    # Manual override always wins
-    _env = os.environ.get("AUDIO_DEVICE", "").strip()
-    if _env:
+    env = os.environ.get("AUDIO_DEVICE", "").strip()
+    if env:
         try:
-            idx = int(_env)
+            idx = int(env)
             print(f"🔧 Using AUDIO_DEVICE override: device {idx}")
             return idx
         except ValueError:
             pass
 
-    # Preferred device names (first match wins)
     preferred_names = ["M70", "MB50"]
     devices = sd.query_devices()
 
@@ -870,61 +596,49 @@ def _find_preferred_input_device() -> "int | None":
                 print(f"🎤 Auto-selected input device {idx}: {name} ({max_in}ch)")
                 return idx
 
-    # Fallback: system default
     print("🎤 No preferred device found, using system default input")
     return None
 
 
-def main():
-    """Run the voice assistant."""
+def main() -> None:
     import os
+
     print()
-    print("🎙️  Voice Assistant v2")
-    print("=" * 40)
+    print("🎙️  Voice Assistant v2  (Modular Refactor)")
+    print("=" * 50)
     print()
-    
+
     audio_device = _find_preferred_input_device()
-    
-    # Debug: set DEBUG=1 to trace face vs wake word when going back to sleep
     debug = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")
-    
-    # Stage recordings: SAVE_AUDIO=1 saves raw, VAD, STT per utterance to recordings/{raw,vad,stt}/
     save_audio = os.environ.get("SAVE_AUDIO", "").strip().lower() in ("1", "true", "yes")
-    
-    # Note: we lower the wake word threshold a bit here so
-    # "Alexa" is easier to trigger while debugging.
+
     config = VoiceAssistantConfig(
         audio_device=audio_device,
         enable_wake_word=True,
         enable_noise_reduction=True,
         enable_speaker_isolation=False,
-        # Face detection
         enable_face_detection=True,
         require_face_for_wake_word=True,
         greet_on_face=True,
         track_talking=True,
-        # Wake word tuning for smoother UX
-        wake_word_threshold=0.25,     # easier to trigger than default 0.5
-        wake_word_timeout_sec=30.0,   # 30s to speak after wake word
-        wake_word_cooldown_sec=1.0,   # re-arm quickly if you miss it
-        # Speech timing
-        silence_timeout_ms=400,       # 400ms silence = end of speech (was 500)
-        debug=debug,                  # DEBUG=1 in env to trace face/wake word
-        save_audio=save_audio,        # SAVE_AUDIO=1 to record raw, VAD, STT per utterance
+        wake_word_threshold=0.25,
+        wake_word_timeout_sec=30.0,
+        wake_word_cooldown_sec=1.0,
+        silence_timeout_ms=1000,
+        debug=debug,
+        save_audio=save_audio,
     )
-    
+
     try:
         assistant = VoiceAssistant(config)
         assistant.run()
     except FileNotFoundError as e:
         print(f"\n❌ Error: {e}")
         print("\nMake sure you have downloaded the required models:")
-        print("  - LLM: models/llm/*.gguf")
-        print("  - TTS: models/tts/**/*.onnx")
         sys.exit(1)
     except KeyboardInterrupt:
         pass
-    
+
     print("\n👋 Goodbye!")
 
 
