@@ -1,0 +1,25 @@
+[Unit]
+Description=Chimcook Voice Assistant
+Documentation=https://github.com/SagitaKDX/Chimcook
+# Start after the user's graphical session is ready (PulseAudio will be up)
+After=default.target pulseaudio.service graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/sagitakdx/Desktop/Code/Chimcook
+
+# Start the container stack
+ExecStart=/usr/bin/docker compose up -d
+
+# Stop cleanly on logout / shutdown
+ExecStop=/usr/bin/docker compose stop
+
+# If docker isn't ready yet, retry a few times
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target
