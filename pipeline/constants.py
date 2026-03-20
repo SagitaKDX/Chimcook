@@ -15,7 +15,7 @@ CHUNK_MS: int = 80               # ms per audio-loop chunk (80 ms = 1 280 sample
 FRAME_MS: int = 32               # ms per Silero frame (512 samples @ 16 kHz)
 FRAME_SAMPLES: int = SAMPLE_RATE * FRAME_MS // 1000   # = 512
 
-SILERO_THRESHOLD: float = 0.45   # speech-probability gate  (lower → more sensitive)
+SILERO_THRESHOLD: float = 0.6   # speech-probability gate  (lower → more sensitive)
 SILENCE_TIMEOUT_MS: int = 600    # ms of silence → end of utterance
 MIN_SPEECH_MS: int = 200         # ms – ignore utterances shorter than this
 

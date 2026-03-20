@@ -193,6 +193,8 @@ class InferenceWorker:
                         tts_audio, sr = a._speech._tts.synthesize(sentence)
                         seg_dur = len(tts_audio) / sr
                         audio_duration_total += seg_dur
+                        # Keep mic muted while this chunk plays
+                        a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
                         a._speech._audio_output.play(tts_audio, sr)
 
         except Exception as e:
@@ -205,6 +207,8 @@ class InferenceWorker:
                 tts_audio, sr = a._speech._tts.synthesize(sentence_buf)
                 seg_dur = len(tts_audio) / sr
                 audio_duration_total += seg_dur
+                # Keep mic muted while this chunk plays
+                a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
                 a._speech._audio_output.play(tts_audio, sr)
             except Exception:
                 pass
@@ -215,7 +219,8 @@ class InferenceWorker:
         if full_text:
             a._speech._add_to_history("assistant", full_text)
 
-        mute_until = time.time() + audio_duration_total + (a.config.mute_during_speech_ms / 1000.0)
+        # Final safety mute
+        mute_until = time.time() + (a.config.mute_during_speech_ms / 1000.0)
 
         llm_total_ms = int((time.time() - t1) * 1000)
         print(f"[VERIFY: PROC_COMPLETE] (LLM+TTS: {llm_total_ms}ms, audio: {audio_duration_total:.2f}s)")

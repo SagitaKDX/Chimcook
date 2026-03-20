@@ -76,7 +76,7 @@ Be friendly and cheerful in your tone."""
     # Wake Word Settings
     # =========================================================================
     wake_word_model: str = "alexa"        # Built-in: alexa, hey_mycroft, hey_jarvis
-    wake_word_threshold: float = 0.5      # Detection threshold
+    wake_word_threshold: float = 0.65      # Detection threshold
     wake_word_timeout_sec: float = 30.0   # Listen this long after wake word
     wake_word_cooldown_sec: float = 5.0   # Cooldown after timeout (prevent immediate re-trigger)
     
@@ -93,7 +93,7 @@ Be friendly and cheerful in your tone."""
     # =========================================================================
     # Self-Voice Filtering
     # =========================================================================
-    mute_during_speech_ms: int = 200  # Extra mute after TTS (covers output buffer latency)
+    mute_during_speech_ms: int = 1000  # Extra mute after TTS (covers output buffer latency)
     
     # =========================================================================
     # Debug Settings
