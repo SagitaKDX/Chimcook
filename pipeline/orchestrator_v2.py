@@ -576,16 +576,21 @@ def _find_preferred_input_device() -> "int | None":
     import os
     import sounddevice as sd
 
-    env = os.environ.get("AUDIO_DEVICE", "").strip()
+    # Check both common env var names for consistency
+    env = os.environ.get("AUDIO_DEVICE") or os.environ.get("AUDIO_INPUT_DEVICE")
+    
+    preferred_names = ["M70", "MB50"]
+    
     if env:
         try:
             idx = int(env)
-            print(f"🔧 Using AUDIO_DEVICE override: device {idx}")
+            print(f"🔧 Using audio device override: index {idx}")
             return idx
         except ValueError:
-            pass
+            # If not an integer, treat it as a preferred name substring
+            print(f"🔧 Using audio device search term: '{env}'")
+            preferred_names.insert(0, env)
 
-    preferred_names = ["M70", "MB50"]
     devices = sd.query_devices()
 
     for pref in preferred_names:
@@ -596,7 +601,18 @@ def _find_preferred_input_device() -> "int | None":
                 print(f"🎤 Auto-selected input device {idx}: {name} ({max_in}ch)")
                 return idx
 
-    print("🎤 No preferred device found, using system default input")
+    print("🎤 No preferred device found. Available input devices:")
+    found_any = False
+    for idx, dev in enumerate(devices):
+        max_in = int(dev.get("max_input_channels", 0) or 0) if isinstance(dev, dict) else 0
+        if max_in > 0:
+            print(f"   [{idx}] {dev.get('name', 'Unknown')}")
+            found_any = True
+    
+    if not found_any:
+        print("   (No input devices detected by sounddevice)")
+        
+    print("🎤 Using system default input")
     return None
 
 
