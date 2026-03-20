@@ -28,8 +28,8 @@ FACE_STABLE_FRAMES: int = 3      # consecutive HOG-positive frames before FACE_S
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
 # (seconds unless noted)
-SOFT_GONE_SEC: float = 5.0              # face absent → soft-lock wake word
-HARD_GONE_TIMEOUT_SEC: float = 120.0   # face absent → full session reset
+SOFT_GONE_SEC: float = 5.0             # face absent → soft-lock wake word
+HARD_GONE_TIMEOUT_SEC: float = 35.0    # face absent → full session reset
 GREET_COOLDOWN_SEC: float = 1_800.0    # 30 min between automated greetings
 SESSION_DURATION_SEC: float = 30.0     # stay "in session" for this long after any utterance
 WAKE_WORD_DECAY_COOLDOWN: float = 3.0  # extra cooldown to let OWW internal state decay
