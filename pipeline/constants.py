@@ -16,7 +16,7 @@ FRAME_MS: int = 32               # ms per Silero frame (512 samples @ 16 kHz)
 FRAME_SAMPLES: int = SAMPLE_RATE * FRAME_MS // 1000   # = 512
 
 SILERO_THRESHOLD: float = 0.45   # speech-probability gate  (lower → more sensitive)
-SILENCE_TIMEOUT_MS: int = 1_000  # ms of silence → end of utterance
+SILENCE_TIMEOUT_MS: int = 600    # ms of silence → end of utterance
 MIN_SPEECH_MS: int = 200         # ms – ignore utterances shorter than this
 
 # Derived silence / min-speech frame counts (handy for loop comparisons)

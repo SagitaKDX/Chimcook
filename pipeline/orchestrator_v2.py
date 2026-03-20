@@ -376,16 +376,13 @@ class VoiceAssistant:
                                 self._wake_word.extend_timeout()
 
                             if not is_recording:
-                                # Phase 4: MIC_ACTIVE — play earcon on speech start
+                                # Phase 4: MIC_ACTIVE
                                 is_recording = True
                                 silence_frame_count = 0
                                 collected_frames = [frame_512]
                                 if self.config.save_audio:
                                     raw_chunks.append(chunk.copy())
                                 
-                                self._components.audio_output.play(
-                                    self._earcon_audio, self._earcon_sr
-                                )
                                 print(f"\r[VERIFY: MIC_ACTIVE] 🎤 Listening...", end="", flush=True)
                             else:
                                 collected_frames.append(frame_512)

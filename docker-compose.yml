@@ -21,6 +21,11 @@ services:
       - ~/.config/pulse/cookie:/root/.config/pulse/cookie:ro # Authentication cookie
       - ./known_faces:/app/known_faces    # Face recognition photos
       - ./recordings:/app/recordings      # Debug recordings
+      - ./core:/app/core                  # Live code editing
+      - ./pipeline:/app/pipeline          # Live code editing
+      - ./config:/app/config              # Live code editing
+      - ./utils:/app/utils                # Live code editing
+      - ./assets:/app/assets              # Sounds and images
     
     environment:
       - PULSE_SERVER=unix:/run/user/1000/pulse/native

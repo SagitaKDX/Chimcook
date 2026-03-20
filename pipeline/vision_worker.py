@@ -166,7 +166,7 @@ class VisionWorker:
         a._muted_until = now + duration + a.config.mute_during_speech_ms / 1000.0
 
         if a._wake_word:
-            a._wake_word._state.cooldown = a._muted_until + 0.5
+            a._wake_word._state.cooldown = a._muted_until
             a._wake_word._model.reset()
 
         a._speech._audio_output.play(audio, sr)

@@ -162,8 +162,8 @@ class SpeechProcessor:
         goodbye_audio, sr = self._tts.synthesize(goodbye_text)
         audio_duration = len(goodbye_audio) / sr
         
-        # Set mute to cover the full playback + 3 second buffer after
-        mute_until = time.time() + audio_duration + 3.0
+        # Set mute to cover the full playback + normal buffer
+        mute_until = time.time() + audio_duration + (self.config.mute_during_speech_ms / 1000.0)
         
         # NOW play (caller should have set _muted_until before this returns)
         self._audio_output.play(goodbye_audio, sr)
@@ -269,20 +269,9 @@ class SpeechProcessor:
         """
         Speak a short acknowledgment to let the user know the AI is processing.
         
-        Uses random phrases to keep it feeling natural.
         Returns mute_until timestamp.
         """
-        import random
-        phrases = [
-            "Got it, let me think...",
-            "Hmm, one moment...",
-            "Let me check that for you...",
-            "Sure, give me a sec...",
-            "On it!",
-            "Let me think about that...",
-            "Good question, one moment...",
-        ]
-        phrase = random.choice(phrases)
+        phrase = "Got it."
         if self.config.debug:
             print(f"   [Thinking: \"{phrase}\"]")
         return self.say(phrase)

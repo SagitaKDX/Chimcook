@@ -95,6 +95,7 @@ COPY core/ ./core/
 COPY pipeline/ ./pipeline/
 COPY utils/ ./utils/
 COPY config/ ./config/
+COPY assets/ ./assets/
 COPY .env.example ./.env.example
 
 # Copy .env if it exists, otherwise use example
