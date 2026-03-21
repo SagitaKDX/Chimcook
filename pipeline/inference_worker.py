@@ -207,7 +207,10 @@ class InferenceWorker:
 
         if sentence_buf.strip():
             print(sentence_buf, end=" ", flush=True)
-            full_response.append(sentence_buf)
+            # NOTE: Do NOT append sentence_buf to full_response here — the tokens
+            # that make up this remainder were already individually appended during
+            # the streaming loop above.  Appending again would duplicate the text
+            # in conversation history and cause the LLM to repeat itself.
             try:
                 tts_audio, sr = a._speech._tts.synthesize(sentence_buf)
                 seg_dur = len(tts_audio) / sr

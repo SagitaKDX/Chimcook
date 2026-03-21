@@ -68,7 +68,7 @@ class TTSConfigCute(TTSConfig):
     """Pre-configured TTS with cute voice (libritts speaker 100)."""
     # Uses libritts high quality with speaker 100 (cute female voice)
     speaker_id: int = 100
-    length_scale: float = 0.95      # Slightly faster, more energetic
+    length_scale: float = 1.15      # Slightly slower, clearer and more comfortable
 
 
 @dataclass
