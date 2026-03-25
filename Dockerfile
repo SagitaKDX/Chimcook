@@ -96,6 +96,9 @@ COPY pipeline/ ./pipeline/
 COPY utils/ ./utils/
 COPY config/ ./config/
 COPY assets/ ./assets/
+COPY templates/ ./templates/
+COPY static/ ./static/
+COPY web_ui.py ./
 COPY .env.example ./.env.example
 
 # Copy .env if it exists, otherwise use example
@@ -113,7 +116,7 @@ RUN if [ ! -f .env ]; then cp .env.example .env; fi
 
 # Update .env with correct model paths
 RUN sed -i 's|^LLM_MODEL_PATH=.*|LLM_MODEL_PATH=models/llm/qwen2.5-3b-instruct-q4_k_m.gguf|' .env && \
-    sed -i 's|^TTS_MODEL_PATH=.*|TTS_MODEL_PATH=models/tts/en_US-libritts-high.onnx|' .env
+    sed -i 's|^TTS_MODEL_PATH=.*|TTS_MODEL_PATH=models/tts/en_US-hfc_female-medium.onnx|' .env
 
 # Environment
 ENV PYTHONUNBUFFERED=1

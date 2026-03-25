@@ -32,6 +32,10 @@ services:
       - ./config:/app/config              # Live code editing
       - ./utils:/app/utils                # Live code editing
       - ./assets:/app/assets              # Sounds and images
+      - ./data:/app/data                  # Knowledge base index and docs
+      - ./templates:/app/templates        # Web UI HTML templates
+      - ./static:/app/static              # Web UI CSS stylesheets
+      - ./web_ui.py:/app/web_ui.py        # Web UI application logic
     
     environment:
       - PULSE_SERVER=unix:/run/user/1000/pulse/native
@@ -41,5 +45,5 @@ services:
       - DEBUG=${DEBUG:-1}        # 1 = show per-frame VAD prob bars; set to 0 to disable
       - SAVE_AUDIO=${SAVE_AUDIO:-0}
 
-    # Network not needed (fully offline)
-    network_mode: none
+    # Use host networking so the Flask Web UI (port 5000) is accessible from your browser
+    network_mode: host

@@ -49,3 +49,14 @@ opencv-python>=4.8.0,<4.10      # Camera capture
 python-dotenv>=1.0.0            # .env configuration
 huggingface_hub>=0.20.0         # Model downloading
 setuptools<70                   # pkg_resources for face_recognition_models
+
+# =============================================================================
+# RAG & WEB UI
+# =============================================================================
+langchain>=0.1.0                # Processing pipelines
+langchain-community>=0.0.10     # Community integrations
+langchain-huggingface>=0.0.1    # Huggingface local embeddings
+sentence-transformers>=2.2.0    # Local vector embeddings
+faiss-cpu>=1.7.4                # Local vector database
+flask>=3.0.0                    # Web UI framework
+werkzeug>=3.0.0                 # Web server utility

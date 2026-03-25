@@ -52,6 +52,7 @@ class ComponentManager:
         self.face_detector = None
         self.wake_word_model = None
         self.wake_word_name = ""
+        self.rag = None
         
         # Track which VAD is used
         self.use_hybrid_vad = False
@@ -75,6 +76,7 @@ class ComponentManager:
         self._init_audio_output()
         self._init_face_detector()
         self._init_wake_word()
+        self._init_rag()
         
         self._components_initialized = True
         
@@ -158,11 +160,14 @@ class ComponentManager:
         import os, math
         all_cores = os.cpu_count() or 4
         threads_90 = max(1, math.ceil(all_cores * 0.9))
-        print(f"[5/8] Speech-to-Text (distil-large-v3, {threads_90}/{all_cores} threads = 90%)...")
-        from core.stt import STT, STTConfigForAccents
-        self.stt = STT(STTConfigForAccents(
+        print(f"[5/8] Speech-to-Text (base.en, {threads_90}/{all_cores} threads = 90%)...")
+        from core.stt import STT, STTConfig
+        self.stt = STT(STTConfig(
+            model_size="base.en",    # English-only model
             cpu_threads=threads_90,  # 90% of all MiniPC cores
             compute_type="int8",
+            language="en",           # English-only
+            vad_filter=True,         # Whisper's internal VAD to nuke hallucinated languages
         ))
     
     def _init_llm(self) -> None:
@@ -181,7 +186,7 @@ class ComponentManager:
             model_path=model_path,
             n_ctx=2048,
             n_threads=threads_90,   # 90% of all MiniPC cores
-            max_tokens=80,
+            max_tokens=300,
         ))
     
     def _find_llm_model(self) -> str:
@@ -202,26 +207,26 @@ class ComponentManager:
     
     def _init_tts(self) -> None:
         """Initialize text-to-speech."""
-        print("[7/8] Text-to-Speech (cute voice)...")
-        from core.tts import TTS, TTSConfigCute
+        print("[7/8] Text-to-Speech (hfc_female voice)...")
+        from core.tts import TTS, TTSConfigNatural
         
         model_path = self.config.tts_model_path
         if not model_path:
             model_path = self._find_tts_model()
         
-        self.tts = TTS(TTSConfigCute(
+        self.tts = TTS(TTSConfigNatural(
             model_path=model_path,
-            speaker_id=self.config.tts_speaker_id,
+            speaker_id=0,
         ))
     
     def _find_tts_model(self) -> str:
         """Auto-detect TTS model path."""
         models_dir = Path(__file__).parent.parent / "models" / "tts"
         
-        # Prefer libritts for cute voice
-        libritts = list(models_dir.rglob("*libritts*.onnx")) if models_dir.exists() else []
-        if libritts:
-            return str(libritts[0])
+        # Prefer hfc_female
+        hfc_female = list(models_dir.rglob("*hfc_female*.onnx")) if models_dir.exists() else []
+        if hfc_female:
+            return str(hfc_female[0])
         
         # Fallback to any ONNX
         onnx_files = list(models_dir.rglob("*.onnx")) if models_dir.exists() else []
@@ -235,7 +240,7 @@ class ComponentManager:
         print("[8/8] Audio Output...")
         from core.audio_output import AudioOutput, AudioOutputConfig
         
-        self.audio_output = AudioOutput(AudioOutputConfig(volume=0.9))
+        self.audio_output = AudioOutput(AudioOutputConfig(volume=2.5))
     
     def _init_face_detector(self) -> None:
         """Initialize face detector."""
@@ -331,6 +336,17 @@ class ComponentManager:
                 return k
         return keys[0]
     
+    def _init_rag(self) -> None:
+        """Initialize retrieval-augmented generation."""
+        print("[+] RAG Knowledge Base...")
+        try:
+            from core.rag import RAGPipeline
+            self.rag = RAGPipeline()
+            print("      ✓ RAG loaded")
+        except Exception as e:
+            print(f"      ✗ RAG failed to initialize: {e}")
+            self.rag = None
+
     def stop(self) -> None:
         """Stop all components."""
         if self.audio_input:

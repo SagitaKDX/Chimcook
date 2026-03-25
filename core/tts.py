@@ -82,9 +82,9 @@ class TTSConfigFast(TTSConfig):
 @dataclass  
 class TTSConfigNatural(TTSConfig):
     """Pre-configured TTS for more natural sounding speech."""
-    length_scale: float = 1.05      # Slightly slower, more natural
-    noise_scale: float = 0.8        # More variation
-    noise_w_scale: float = 0.9
+    length_scale: float = 1.15      # Slower pacing for maximum clarity
+    noise_scale: float = 0.667      # Standard clean pronunciation
+    noise_w_scale: float = 0.8
 
 
 class TextNormalizer:
@@ -145,6 +145,9 @@ class TextNormalizer:
         text = text.replace("+", " plus ")
         text = text.replace("=", " equals ")
         
+        # Convert times like "9:14" to "9 14" (read as "nine fourteen")
+        text = re.sub(r'\b(\d{1,2}):(\d{2})\b', r'\1 \2', text)
+        
         # Convert simple numbers (up to 999)
         text = re.sub(r'\b(\d{1,3})\b', lambda m: cls._number_to_words(int(m.group(1))), text)
         
@@ -154,6 +157,14 @@ class TextNormalizer:
         # Remove or replace problematic characters
         text = text.replace('"', '')
         text = text.replace("'", "'")  # Normalize apostrophes
+        text = text.replace("*", "").replace("`", "")  # Strip markdown formatting
+        
+        # Aggressively strip out unpronounceable unicode glyphs/symbols (like combining marks)
+        # Keeps: alphabet, numbers (thanks to \w), spaces, and basic punctuation
+        text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
+        
+        # Explicitly remove IPA phonetic combining marks hallucinated by LLM
+        text = text.replace('\u0329', '')
         
         return text.strip()
     
@@ -211,27 +222,26 @@ class TTS:
         
         self.config = config or TTSConfig()
         
-        # Find model if not specified
-        if not self.config.model_path:
-            self.config.model_path = self._find_model()
+        # Dictionary to store loaded voices by language code
+        self._voices: Dict[str, PiperVoice] = {}
         
-        model_path = Path(self.config.model_path)
-        if not model_path.exists():
+        # Default voice (English)
+        if not self.config.model_path:
+            self.config.model_path = self._find_model("en")
+        
+        # Also try to find Vietnamese voice implicitly if not provided
+        vi_model_path = self._find_model("vi_VN", raise_if_missing=False)
+        
+        self.load_voice("en", self.config.model_path)
+        
+        if vi_model_path:
+            self.load_voice("vi", vi_model_path)
+            
+        if not self._voices:
             raise FileNotFoundError(
-                f"Voice model not found: {model_path}\n"
+                "No voice models loaded. "
                 "Download a voice model first. See docstring for instructions."
             )
-        
-        print(f"[TTS] Loading voice: {model_path.stem}")
-        
-        load_start = time.time()
-        
-        # Load Piper voice
-        self._voice = PiperVoice.load(str(model_path))
-        
-        load_time = time.time() - load_start
-        print(f"[TTS] Voice loaded in {load_time:.2f}s")
-        print(f"      Sample rate: {self._voice.config.sample_rate} Hz")
         
         # Text normalizer
         self._normalizer = TextNormalizer()
@@ -242,28 +252,57 @@ class TTS:
             "total_chars": 0,
             "total_time": 0.0,
         }
+        
+    def load_voice(self, language: str, model_path_str: str) -> None:
+        """Load a voice model for a specific language."""
+        model_path = Path(model_path_str)
+        if not model_path.exists():
+            print(f"[TTS] Warning: Voice model not found: {model_path}")
+            return
+            
+        print(f"[TTS] Loading {language} voice: {model_path.stem}")
+        load_start = time.time()
+        
+        try:
+            voice = PiperVoice.load(str(model_path))
+            self._voices[language] = voice
+            
+            load_time = time.time() - load_start
+            print(f"[TTS] {language} voice loaded in {load_time:.2f}s")
+            print(f"      Sample rate: {voice.config.sample_rate} Hz")
+        except Exception as e:
+            print(f"[TTS] Error loading {language} voice: {e}")
     
-    def _find_model(self) -> str:
-        """Find a voice model in the models directory."""
+    def _find_model(self, prefix: str = "en", raise_if_missing: bool = True) -> Optional[str]:
+        """Find a voice model matching a prefix in the models directory."""
         models_dir = Path(__file__).parent.parent / "models" / "tts"
         
         if models_dir.exists():
-            # Search for .onnx files recursively
-            onnx_files = list(models_dir.rglob("*.onnx"))
-            if onnx_files:
-                return str(onnx_files[0])
+            # Search for .onnx files matching prefix
+            for onnx_file in models_dir.rglob("*.onnx"):
+                if onnx_file.name.startswith(prefix):
+                    return str(onnx_file)
+            
+            # Fallback to any ONNX if looking for English
+            if prefix == "en":
+                onnx_files = list(models_dir.rglob("*.onnx"))
+                if onnx_files:
+                    return str(onnx_files[0])
         
-        raise FileNotFoundError(
-            "No voice model found in models/tts/\n"
-            "Download a voice with:\n"
-            "  python -c \"from huggingface_hub import hf_hub_download; "
-            "hf_hub_download('rhasspy/piper-voices', 'en/en_US/amy/medium/en_US-amy-medium.onnx', local_dir='models/tts')\""
-        )
+        if raise_if_missing:
+            raise FileNotFoundError(
+                f"No voice model found for {prefix} in models/tts/\n"
+                "Download a voice with:\n"
+                "  python -c \"from huggingface_hub import hf_hub_download; "
+                "hf_hub_download('rhasspy/piper-voices', 'en/en_US/amy/medium/en_US-amy-medium.onnx', local_dir='models/tts')\""
+            )
+        return None
     
     def synthesize(
         self, 
         text: str,
         normalize: bool = True,
+        language: str = "en",
     ) -> Tuple[np.ndarray, int]:
         """
         Convert text to speech audio.
@@ -271,13 +310,26 @@ class TTS:
         Args:
             text: Text to synthesize
             normalize: Whether to normalize text (default: True)
+            language: The language code to use (default: "en")
             
         Returns:
             Tuple of (audio_array, sample_rate)
             audio_array: np.ndarray int16, shape (samples,)
         """
         if not text.strip():
-            return np.array([], dtype=np.int16), self.sample_rate
+            # Get default sample rate
+            sr = self.sample_rate
+            if language in self._voices:
+                sr = self._voices[language].config.sample_rate
+            return np.array([], dtype=np.int16), sr
+            
+        # Select voice based on language
+        voice_to_use = self._voices.get(language, self._voices.get("en"))
+        if not voice_to_use:
+            # Fallback to first available
+            voice_to_use = next(iter(self._voices.values()))
+            
+        sample_rate = voice_to_use.config.sample_rate
         
         # Normalize text
         if normalize:
@@ -298,12 +350,12 @@ class TTS:
         # Synthesize
         audio_chunks = []
         
-        for chunk in self._voice.synthesize(text, syn_config=syn_config):
+        for chunk in voice_to_use.synthesize(text, syn_config=syn_config):
             audio_chunks.append(chunk.audio_int16_array)
         
         # Combine chunks
         if not audio_chunks:
-            return np.array([], dtype=np.int16), self.sample_rate
+            return np.array([], dtype=np.int16), sample_rate
             
         audio_array = np.concatenate(audio_chunks)
         
@@ -312,12 +364,13 @@ class TTS:
         self._stats["total_chars"] += len(text)
         self._stats["total_time"] += time.time() - start_time
         
-        return audio_array, self.sample_rate
+        return audio_array, sample_rate
     
     def synthesize_to_bytes(
         self,
         text: str,
         normalize: bool = True,
+        language: str = "en",
     ) -> bytes:
         """
         Synthesize text and return raw audio bytes (int16 PCM).
@@ -327,11 +380,12 @@ class TTS:
         Args:
             text: Text to synthesize
             normalize: Whether to normalize text
+            language: The language code
             
         Returns:
             Raw audio bytes (int16 PCM, mono)
         """
-        audio, _ = self.synthesize(text, normalize)
+        audio, _ = self.synthesize(text, normalize, language)
         return audio.tobytes()
     
     def synthesize_to_file(
@@ -339,6 +393,7 @@ class TTS:
         text: str,
         output_path: str,
         normalize: bool = True,
+        language: str = "en",
     ) -> float:
         """
         Synthesize text and save to WAV file.
@@ -347,11 +402,12 @@ class TTS:
             text: Text to synthesize
             output_path: Path to output WAV file
             normalize: Whether to normalize text
+            language: The language code
             
         Returns:
             Duration of audio in seconds
         """
-        audio, sample_rate = self.synthesize(text, normalize)
+        audio, sample_rate = self.synthesize(text, normalize, language)
         
         # Save as WAV
         with wave.open(output_path, 'wb') as wav_file:
@@ -367,6 +423,7 @@ class TTS:
         self,
         text: str,
         normalize: bool = True,
+        language: str = "en",
     ) -> List[Tuple[str, np.ndarray]]:
         """
         Synthesize text sentence by sentence.
@@ -376,6 +433,7 @@ class TTS:
         Args:
             text: Text to synthesize
             normalize: Whether to normalize text
+            language: The language code
             
         Returns:
             List of (sentence, audio_array) tuples
@@ -386,15 +444,19 @@ class TTS:
         results = []
         for sentence in sentences:
             if sentence.strip():
-                audio, _ = self.synthesize(sentence, normalize)
+                audio, _ = self.synthesize(sentence, normalize, language)
                 results.append((sentence, audio))
         
         return results
     
     @property
     def sample_rate(self) -> int:
-        """Get output sample rate."""
-        return self._voice.config.sample_rate
+        """Get default (English) output sample rate."""
+        if "en" in self._voices:
+            return self._voices["en"].config.sample_rate
+        if self._voices:
+            return next(iter(self._voices.values())).config.sample_rate
+        return 16000
     
     def get_stats(self) -> dict:
         """Get synthesis statistics."""

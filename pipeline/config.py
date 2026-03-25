@@ -61,9 +61,10 @@ class VoiceAssistantConfig:
     # Conversation Settings
     # =========================================================================
     max_history_turns: int = 6
-    system_prompt: str = """You are a cute and helpful voice assistant. 
-Keep your responses brief and conversational (1-3 sentences).
-Be friendly and cheerful in your tone."""
+    system_prompt: str = """You are a highly intelligent and helpful university voice assistant.
+Answer naturally using your internal knowledge. You must ALWAYS respond strictly in English, even if your internal knowledge is written in Vietnamese.
+Limit your responses to 4-5 sentences (maximum 80 words).
+NEVER mention the words "database", "context", or "knowledge base" to the user."""
     
     # =========================================================================
     # Timing Settings

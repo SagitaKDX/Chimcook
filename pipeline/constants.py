@@ -24,7 +24,7 @@ SILENCE_FRAMES: int = SILENCE_TIMEOUT_MS // FRAME_MS   # ≈ 31 frames
 MIN_SPEECH_FRAMES: int = MIN_SPEECH_MS // FRAME_MS     # ≈ 6 frames
 
 # ─── Vision (Phase 1) ─────────────────────────────────────────────────────────
-FACE_STABLE_FRAMES: int = 3      # consecutive HOG-positive frames before FACE_STABLE
+FACE_STABLE_FRAMES: int = 1      # consecutive HOG-positive frames before FACE_STABLE
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
 # (seconds unless noted)

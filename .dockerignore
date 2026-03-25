@@ -39,7 +39,6 @@ pect
 
 # Documentation (not needed in image)
 *.md
-assets/
 
 # OS files
 .DS_Store

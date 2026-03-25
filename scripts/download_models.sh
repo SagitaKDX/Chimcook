@@ -21,30 +21,30 @@ else
 fi
 
 # ─────────────────────────────────────────────────
-# 2. TTS - Piper en_US-libritts-high
+# 2. TTS - Piper en_US-hfc_female-medium
 # ─────────────────────────────────────────────────
 mkdir -p "${MODELS_DIR}/tts"
-TTS_FILE="${MODELS_DIR}/tts/en_US-libritts-high.onnx"
+TTS_FILE="${MODELS_DIR}/tts/en_US-hfc_female-medium.onnx"
 if [ ! -f "$TTS_FILE" ]; then
     echo "⬇️  Downloading TTS model..."
     wget -q --show-progress -O "$TTS_FILE" \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx"
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx"
     wget -q --show-progress -O "${TTS_FILE}.json" \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx.json"
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json"
 else
     echo "✅ TTS model already exists"
 fi
 
 # ─────────────────────────────────────────────────
-# 3. STT - faster-whisper distil-large-v3 (~1.5GB)
+# 3. STT - faster-whisper base.en (~150MB)
 # ─────────────────────────────────────────────────
 mkdir -p "${MODELS_DIR}/stt"
 STT_MARKER="${MODELS_DIR}/stt/model.bin"
 if [ ! -f "$STT_MARKER" ]; then
-    echo "⬇️  Downloading STT model (distil-large-v3)..."
+    echo "⬇️  Downloading STT model (base.en)..."
     python3 -c "
 from faster_whisper import WhisperModel
-WhisperModel('distil-large-v3', device='cpu', compute_type='int8', download_root='${MODELS_DIR}/stt')
+WhisperModel('base.en', device='cpu', compute_type='int8', download_root='${MODELS_DIR}/stt')
 print('STT model downloaded successfully')
 "
 else
@@ -65,6 +65,6 @@ print('Wake word models downloaded successfully')
 echo ""
 echo "✅ All models downloaded!"
 echo "   LLM:       ${MODELS_DIR}/llm/qwen2.5-3b-instruct-q4_k_m.gguf"
-echo "   TTS:       ${MODELS_DIR}/tts/en_US-libritts-high.onnx"
-echo "   STT:       ${MODELS_DIR}/stt/ (distil-large-v3)"
+echo "   TTS:       ${MODELS_DIR}/tts/en_US-hfc_female-medium.onnx"
+echo "   STT:       ${MODELS_DIR}/stt/ (base.en)"
 echo "   Wake Word: openwakeword built-in models"

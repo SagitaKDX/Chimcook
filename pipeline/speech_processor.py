@@ -79,12 +79,13 @@ class SpeechProcessor:
         if self.config.save_audio:
             self._save_debug_audio(audio, record_ts=record_ts)
         
-        # Step 1: STT
-        text = self._transcribe(audio)
+        # Step 1: STT with language detection
+        text, info = self._transcribe(audio)
         if not text:
             return False, 0.0
         
-        print(f"👤 You: {text}")
+        detected_language = info.get("language", "en")
+        print(f"👤 You ({detected_language}): {text}")
         
         # Check for goodbye
         if self._is_goodbye(text):
@@ -94,13 +95,13 @@ class SpeechProcessor:
         self._add_to_history("user", text)
         
         # Step 2: LLM
-        response = self._generate_response(text)
+        response = self._generate_response(text, detected_language)
         print(f"🤖 Assistant: {response}")
         
         self._add_to_history("assistant", response)
         
-        # Step 3: TTS + Play
-        mute_until = self._speak(response)
+        # Step 3: TTS + Play using detected language
+        mute_until = self._speak(response, language=detected_language)
         
         return False, mute_until
     
@@ -129,24 +130,24 @@ class SpeechProcessor:
             audio = np.pad(audio, (0, min_samples - len(audio)), mode="constant", constant_values=0)
         return audio
 
-    def _transcribe(self, audio: np.ndarray) -> str:
-        """Transcribe audio to text."""
+    def _transcribe(self, audio: np.ndarray) -> Tuple[str, Dict]:
+        """Transcribe audio to text and detect language."""
         print(f"\rStatus: 🧠 Transcribing...            ", end="", flush=True)
         
         start_time = time.time()
-        text = self._stt.transcribe(audio)
+        text, info = self._stt.transcribe_with_info(audio)
         stt_time = time.time() - start_time
         
         if not text.strip():
             print("\r(empty transcription)            ")
-            return ""
+            return "", {}
         
         print(f"\r" + " " * 50 + "\r", end="")  # Clear line
         
         if self.config.debug:
             print(f"   [STT: {stt_time:.2f}s]")
         
-        return text.strip()
+        return text.strip(), info
     
     def _is_goodbye(self, text: str) -> bool:
         """Check if text contains goodbye phrase."""
@@ -170,15 +171,19 @@ class SpeechProcessor:
         
         return True, mute_until
     
-    def _generate_response(self, text: str) -> str:
+    def _generate_response(self, text: str, detected_language: str = "en") -> str:
         """Generate LLM response."""
         print(f"🤖 Thinking...", end="", flush=True)
+        
+        # Give the LLM a strong hint about the spoken language
+        lang_hint = "Vietnamese" if detected_language == "vi" else "English"
+        system_prompt = self.config.system_prompt + f"\n\n[DETECTED LANGUAGE: {lang_hint}. YOU MUST REPLY IN {lang_hint}.]"
         
         start_time = time.time()
         response = self._llm.generate(
             text,
             history=self._conversation_history[:-1],  # Exclude current message
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
         )
         llm_time = time.time() - start_time
         
@@ -189,10 +194,10 @@ class SpeechProcessor:
         
         return response
     
-    def _speak(self, text: str) -> float:
-        """Synthesize and play text. Returns mute_until timestamp."""
+    def _speak(self, text: str, language: str = "en") -> float:
+        """Synthesize and play text using the correct language voice. Returns mute_until timestamp."""
         start_time = time.time()
-        tts_audio, sr = self._tts.synthesize(text)
+        tts_audio, sr = self._tts.synthesize(text, language=language)
         tts_time = time.time() - start_time
         
         if self.config.debug:

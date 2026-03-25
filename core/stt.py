@@ -45,7 +45,7 @@ class STTConfig:
     device: str = "cpu"             # cpu or cuda
     compute_type: str = "int8"      # int8, float16, float32
     beam_size: int = 1              # 1 for speed, 3-5 for accuracy
-    language: Optional[str] = "en"  # None for auto-detect
+    language: Optional[str] = None  # None for auto-detect (multilingual)
     cpu_threads: int = 4            # CPU threads to use
     vad_filter: bool = False        # We do our own VAD
     download_root: Optional[str] = None  # Model download directory
@@ -244,6 +244,7 @@ class STT:
                 vad_filter=self.config.vad_filter,
                 word_timestamps=False,  # Faster without timestamps
                 condition_on_previous_text=not partial,  # Disable for streaming
+                initial_prompt="Hello, this is english. Xin chào, đây là tiếng việt." # Hint for en/vi
             )
             
             # Collect all segments
@@ -315,6 +316,7 @@ class STT:
                 language=self.config.language if self.config.language else None,
                 vad_filter=self.config.vad_filter,
                 word_timestamps=False,
+                initial_prompt="Hello, this is english. Xin chào, đây là tiếng việt." # Hint for en/vi
             )
             
             # Collect segments

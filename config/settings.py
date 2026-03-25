@@ -113,7 +113,7 @@ class SegmenterConfig:
 @dataclass
 class STTConfig:
     """Speech-to-Text configuration."""
-    model: str = "tiny"
+    model: str = "base"
     device: str = "cpu"
     compute_type: str = "int8"
     beam_size: int = 1
@@ -225,7 +225,7 @@ def load_config(env_path: str = ".env") -> Config:
             max_utterance_ms=_env_int("MAX_UTTERANCE_MS", 15000),
         ),
         stt=STTConfig(
-            model=_env_str("STT_MODEL", "tiny"),
+            model=_env_str("STT_MODEL", "base"),
             device=_env_str("STT_DEVICE", "cpu"),
             compute_type=_env_str("STT_COMPUTE_TYPE", "int8"),
             beam_size=_env_int("STT_BEAM_SIZE", 1),

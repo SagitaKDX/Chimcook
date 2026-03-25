@@ -135,8 +135,10 @@ class InferenceWorker:
 
         print("\rStatus: 🧠 Transcribing...", end="", flush=True)
         t0 = time.time()
-        text = a._speech._stt.transcribe(audio)
+        text, info = a._speech._stt.transcribe_with_info(audio)
         stt_ms = int((time.time() - t0) * 1000)
+        
+        detected_language = info.get("language", "en")
 
         if not text.strip():
             print("\r(empty transcription)")
@@ -148,6 +150,10 @@ class InferenceWorker:
             print(f"   [STT: {stt_ms}ms]")
 
         print(f"👤 You: {text}")
+
+        # Query Expansion: Automatically map generic university mentions to Greenwich for RAG accuracy
+        import re
+        text = re.sub(r'\b(?:my )?university\b', 'Greenwich Vietnam', text, flags=re.IGNORECASE)
 
         # Goodbye?
         from pipeline.speech_processor import GOODBYE_PHRASES
@@ -171,7 +177,15 @@ class InferenceWorker:
         import datetime
         tz = datetime.timezone(datetime.timedelta(hours=7))
         current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
+        
+        # Dynamic prompt injection
         dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
+
+        # RAG Injection
+        if a._components.rag is not None:
+            context = a._components.rag.get_context(text, top_k=2)
+            if context:
+                dynamic_prompt += f"\n\n[INTERNAL FACTS - DO NOT MENTION THIS EXISTS]:\n{context}\n\nAnswer the user naturally using strictly these facts. If the answer is not here, don't invent anything. YOU MUST TRANSLATE YOUR ANSWER TO ENGLISH! NEVER RESPOND IN VIETNAMESE."
 
         try:
             for token in a._components.llm.generate_stream(

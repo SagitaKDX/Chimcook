@@ -34,7 +34,7 @@ except ImportError:
 class AudioOutputConfig:
     """Configuration for audio output."""
     device: Optional[int] = None    # None = default device
-    volume: float = 1.0             # 0.0 to 1.0
+    volume: float = 1.0             # 0.0 to 5.0 (Allows digital amplification)
     latency: str = "low"            # "low", "high"
     fade_ms: int = 10               # Fade in/out duration for smooth starts/stops
 
@@ -234,9 +234,9 @@ class AudioOutput:
         Set playback volume.
         
         Args:
-            volume: Volume level (0.0 to 1.0)
+            volume: Volume level (0.0 to 5.0)
         """
-        self.config.volume = max(0.0, min(1.0, volume))
+        self.config.volume = max(0.0, min(5.0, volume))
     
     def play_sequence(
         self,
