@@ -36,6 +36,20 @@ def list_files():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/delete/<filename>', methods=['DELETE'])
+def delete_file(filename):
+    try:
+        # Prevent directory traversal mapping
+        clean_name = os.path.basename(filename)
+        path = DOCS_DIR / clean_name
+        if path.exists() and path.is_file():
+            path.unlink()
+            return jsonify({"message": f"Deleted {clean_name}"}), 200
+        else:
+            return jsonify({"error": "File not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/status', methods=['GET'])
 def get_db_status():
     faiss_file = Path("data/faiss_index/index.faiss")

@@ -61,10 +61,7 @@ class VoiceAssistantConfig:
     # Conversation Settings
     # =========================================================================
     max_history_turns: int = 6
-    system_prompt: str = """You are a highly intelligent and helpful university voice assistant.
-Answer naturally using your internal knowledge. You must ALWAYS respond strictly in English, even if your internal knowledge is written in Vietnamese.
-Limit your responses to 4-5 sentences (maximum 80 words).
-NEVER mention the words "database", "context", or "knowledge base" to the user."""
+    system_prompt: str = "Role: University Assistant. Reply ONLY in English. Max 3 sentences. No mentioning 'database' or 'context'."
     
     # =========================================================================
     # Timing Settings

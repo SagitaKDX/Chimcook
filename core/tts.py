@@ -82,7 +82,7 @@ class TTSConfigFast(TTSConfig):
 @dataclass  
 class TTSConfigNatural(TTSConfig):
     """Pre-configured TTS for more natural sounding speech."""
-    length_scale: float = 1.15      # Slower pacing for maximum clarity
+    length_scale: float = 0.92      # Sped up by 20% compared to previous setting
     noise_scale: float = 0.667      # Standard clean pronunciation
     noise_w_scale: float = 0.8
 

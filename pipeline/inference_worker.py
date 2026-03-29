@@ -185,7 +185,7 @@ class InferenceWorker:
         if a._components.rag is not None:
             context = a._components.rag.get_context(text, top_k=2)
             if context:
-                dynamic_prompt += f"\n\n[INTERNAL FACTS - DO NOT MENTION THIS EXISTS]:\n{context}\n\nAnswer the user naturally using strictly these facts. If the answer is not here, don't invent anything. YOU MUST TRANSLATE YOUR ANSWER TO ENGLISH! NEVER RESPOND IN VIETNAMESE."
+                dynamic_prompt += f"\nFacts:\n{context}\nRules: 1. Use facts only. 2. English ONLY. 3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
 
         try:
             for token in a._components.llm.generate_stream(
