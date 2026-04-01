@@ -133,6 +133,26 @@ class InferenceWorker:
         if a.config.save_audio:
             a._speech._save_debug_audio(audio, record_ts=record_ts)
 
+        # 1. Start the visual/audio thinking cues immediately!
+        a._speech.play_thinking_chime()
+
+        # 2. Start a Watchdog Thread to warn user if processing takes > 30s
+        import threading
+        first_sentence_played_event = threading.Event()
+        
+        def processing_watchdog():
+            if not first_sentence_played_event.wait(30.0):
+                # If the event was NOT set within 30 seconds...
+                if not first_sentence_played_event.is_set():
+                    print("\n[Watchdog] Processing exceeded 30s, notifying user...")
+                    a._speech._audio_output.stop()
+                    a._speech.say("I am currently working, wait a moment.")
+                    # Restart just the background processing loop smoothly
+                    a._speech.play_thinking_chime(skip_speech=True)
+                    
+        wd_thread = threading.Thread(target=processing_watchdog, daemon=True)
+        wd_thread.start()
+
         print("\rStatus: 🧠 Transcribing...", end="", flush=True)
         t0 = time.time()
         text, info = a._speech._stt.transcribe_with_info(audio)
@@ -142,6 +162,8 @@ class InferenceWorker:
 
         if not text.strip():
             print("\r(empty transcription)")
+            first_sentence_played_event.set() # Stop watchdog
+            a._speech._audio_output.stop()    # Stop background music
             return False, 0.0
 
         print(f"\r" + " " * 60 + "\r", end="")
@@ -158,6 +180,7 @@ class InferenceWorker:
         # Goodbye?
         from pipeline.speech_processor import GOODBYE_PHRASES
         if any(p in text.lower() for p in GOODBYE_PHRASES):
+            first_sentence_played_event.set() # Stop watchdog
             return a._speech._handle_goodbye()
 
         a._speech._add_to_history("user", text)
@@ -211,6 +234,7 @@ class InferenceWorker:
                     if sentence.strip():
                         if not first_sentence_played:
                             first_sentence_played = True
+                            first_sentence_played_event.set() # Stop 30s watchdog!
                             llm_first_ms = int((time.time() - t1) * 1000)
                             print(f"\r" + " " * 40 + "\r", end="")
                             if a.config.debug:
@@ -246,6 +270,9 @@ class InferenceWorker:
                 pass
 
         print()
+
+        # Stop watchdog in case it finished before speaking the first sentence
+        first_sentence_played_event.set()
 
         full_text = "".join(full_response).strip()
         if full_text:

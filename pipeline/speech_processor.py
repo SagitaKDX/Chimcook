@@ -270,7 +270,7 @@ class SpeechProcessor:
         # No ack file - just return with minimal mute
         return time.time() + 0.1
     
-    def play_thinking_chime(self) -> float:
+    def play_thinking_chime(self, skip_speech: bool = False) -> float:
         """
         Speak a short acknowledgment and play a background loop to let the user know the AI is processing.
         
@@ -281,18 +281,16 @@ class SpeechProcessor:
         from pathlib import Path
         import numpy as np
 
-        phrase = "Got it."
-        if self.config.debug:
-            print(f"   [Thinking: \"{phrase}\"]")
+        end_time = time.time()
+        if not skip_speech:
+            phrase = "I'm thinking wait for me a moment."
+            if self.config.debug:
+                print(f"   [Thinking: \"{phrase}\"]")
+                
+            # 1. Speak the acknowledgment (blocking natively)
+            end_time = self.say(phrase)
             
-        # 1. Speak the acknowledgment (blocking natively)
-        end_time = self.say(phrase)
-        
-        # 2. Start the background looping sound
-        processing_path = _project_root / "assets" / "processing.wav"
-        
-        if processing_path.exists():
-            # Wait briefly so it doesn't overlap exactly with the end of "Got it."
+            # Wait briefly so it doesn't overlap exactly with the end of speech
             time.sleep(max(0, end_time - time.time() - 0.2))
             
             try:
