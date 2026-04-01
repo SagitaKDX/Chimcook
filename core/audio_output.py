@@ -205,6 +205,11 @@ class AudioOutput:
         fade_in = np.linspace(0, 1, fade_samples, dtype=np.float32)
         fade_out = np.linspace(1, 0, fade_samples, dtype=np.float32)
         
+        # Proper broadcasting for stereo audio
+        if audio.ndim == 2:
+            fade_in = fade_in[:, np.newaxis]
+            fade_out = fade_out[:, np.newaxis]
+        
         # Apply fades
         audio = audio.copy()
         audio[:fade_samples] *= fade_in
