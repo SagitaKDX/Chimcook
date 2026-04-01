@@ -39,7 +39,7 @@ RUN ls -la /usr/local/lib/python3.11/site-packages/openwakeword/resources/models
 # Pre-cache Silero VAD into torch hub cache
 RUN python -c "\
 import torch; \
-torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=True); \
+torch.hub.load('snakers4/silero-vad', 'silero_vad', force_reload=True, trust_repo=True); \
 print('Silero VAD cached')"
 
 # ─────────────────────────────────────────────────────────────────────────────

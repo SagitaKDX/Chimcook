@@ -272,11 +272,50 @@ class SpeechProcessor:
     
     def play_thinking_chime(self) -> float:
         """
-        Speak a short acknowledgment to let the user know the AI is processing.
+        Speak a short acknowledgment and play a background loop to let the user know the AI is processing.
         
         Returns mute_until timestamp.
         """
+        import scipy.io.wavfile as wav
+        import time
+        from pathlib import Path
+        import numpy as np
+
         phrase = "Got it."
         if self.config.debug:
             print(f"   [Thinking: \"{phrase}\"]")
-        return self.say(phrase)
+            
+        # 1. Speak the acknowledgment (blocking natively)
+        end_time = self.say(phrase)
+        
+        # 2. Start the background looping sound
+        processing_path = _project_root / "assets" / "processing.wav"
+        
+        if processing_path.exists():
+            # Wait briefly so it doesn't overlap exactly with the end of "Got it."
+            time.sleep(max(0, end_time - time.time() - 0.2))
+            
+            try:
+                proc_sr, proc_audio = wav.read(str(processing_path))
+                if proc_audio.dtype == np.int16:
+                    proc_audio = proc_audio.astype(np.float32) / 32768.0
+                
+                # Loop the processing audio 20 times (approx 1.5 minutes)
+                if proc_audio.ndim == 1:
+                    looped_audio = np.tile(proc_audio, 20)
+                else:
+                    looped_audio = np.tile(proc_audio, (20, 1))
+                
+                # Drop volume slightly for background ambience
+                original_volume = self._audio_output.config.volume
+                self._audio_output.set_volume(0.3)
+                
+                # Play non-blocking. When TTS is ready, it will trigger play() which interrupts this.
+                self._audio_output.play(looped_audio, proc_sr, blocking=False)
+                
+                # Restore volume for the TTS
+                self._audio_output.set_volume(original_volume)
+            except Exception as e:
+                print(f"[Audio] Failed to play processing sound: {e}")
+                
+        return end_time

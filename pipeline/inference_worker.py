@@ -172,6 +172,15 @@ class InferenceWorker:
         mute_until = 0.0
         audio_duration_total = 0.0
 
+        # Start RAG in the background immediately to overlap with prompt prep overhead
+        rag_future = None
+        rag_executor = None
+        if a._components.rag is not None:
+            import concurrent.futures
+            # Keep pool alive just for this request
+            rag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            rag_future = rag_executor.submit(a._components.rag.get_context, text, 3)
+
         history_for_llm = a._speech._conversation_history[:-1]
 
         import datetime
@@ -181,9 +190,10 @@ class InferenceWorker:
         # Dynamic prompt injection
         dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
 
-        # RAG Injection
-        if a._components.rag is not None:
-            context = a._components.rag.get_context(text, top_k=2)
+        # Build final prompt with RAG context
+        if rag_future is not None and rag_executor is not None:
+            context = rag_future.result()
+            rag_executor.shutdown(wait=False)
             if context:
                 dynamic_prompt += f"\nFacts:\n{context}\nRules: 1. Use facts only. 2. English ONLY. 3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
 

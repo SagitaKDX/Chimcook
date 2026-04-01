@@ -62,9 +62,27 @@ print('Wake word models downloaded successfully')
 "
 
 # ─────────────────────────────────────────────────
+# 5. RAG Embeddings (Native ONNX)
+# ─────────────────────────────────────────────────
+mkdir -p "${MODELS_DIR}/embed_onnx"
+ONNX_MODEL_URL="https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
+ONNX_TOKENIZER_URL="https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+ONNX_CONFIG_URL="https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer_config.json"
+
+if [ ! -f "${MODELS_DIR}/embed_onnx/model_quantized.onnx" ]; then
+    echo "⬇️  Downloading Native ONNX embedding model..."
+    wget -q --show-progress -O "${MODELS_DIR}/embed_onnx/model_quantized.onnx" "$ONNX_MODEL_URL"
+    wget -q --show-progress -O "${MODELS_DIR}/embed_onnx/tokenizer.json" "$ONNX_TOKENIZER_URL"
+    wget -q --show-progress -O "${MODELS_DIR}/embed_onnx/tokenizer_config.json" "$ONNX_CONFIG_URL"
+else
+    echo "✅ Native ONNX embedding model already exists"
+fi
+
+# ─────────────────────────────────────────────────
 echo ""
 echo "✅ All models downloaded!"
 echo "   LLM:       ${MODELS_DIR}/llm/qwen2.5-3b-instruct-q4_k_m.gguf"
 echo "   TTS:       ${MODELS_DIR}/tts/en_US-hfc_female-medium.onnx"
 echo "   STT:       ${MODELS_DIR}/stt/ (base.en)"
 echo "   Wake Word: openwakeword built-in models"
+echo "   RAG Embed: ${MODELS_DIR}/embed_onnx/ (Native ONNX)"

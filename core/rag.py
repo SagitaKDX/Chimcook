@@ -7,11 +7,16 @@ import warnings
 # Suppress noisy warnings from huggingface
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import torch
+# Prevent PyTorch from hogging cores needed by the LLM and STT
+torch.set_num_threads(2)
+torch.set_num_interop_threads(1)
+from functools import lru_cache
+
 try:
     from langchain_community.document_loaders import TextLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
-    from langchain_community.embeddings import HuggingFaceEmbeddings
     from langchain_community.llms import Ollama
     from langchain_core.prompts import PromptTemplate
     from langchain_core.documents import Document
@@ -20,6 +25,52 @@ except ImportError:
         "Missing RAG dependencies. Please install: "
         "pip install langchain langchain-community langchain-huggingface sentence-transformers faiss-cpu"
     )
+
+import numpy as np
+from langchain_core.embeddings import Embeddings
+
+class NativeONNXEmbeddings(Embeddings):
+    """A bulletproof, dependency-free LangChain wrapper for pure ONNX Runtime embeddings."""
+    def __init__(self, model_path: str):
+        import onnxruntime as ort
+        from transformers import AutoTokenizer
+        
+        # Xenova model specifies model_quantized.onnx or model.onnx
+        onnx_file = f"{model_path}/model_quantized.onnx"
+        if not os.path.exists(onnx_file):
+            onnx_file = f"{model_path}/model.onnx"
+            
+        self.session = ort.InferenceSession(onnx_file, providers=['CPUExecutionProvider'])
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    def _encode(self, texts: List[str]) -> List[List[float]]:
+        inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="np")
+        
+        ort_inputs = {
+            "input_ids": inputs["input_ids"].astype(np.int64),
+            "attention_mask": inputs["attention_mask"].astype(np.int64),
+            "token_type_ids": inputs["token_type_ids"].astype(np.int64)
+        }
+        
+        outputs = self.session.run(None, ort_inputs)
+        token_embeddings = outputs[0]
+        
+        # Mean Pooling over attention mask
+        attention_mask = inputs["attention_mask"]
+        input_mask_expanded = np.repeat(attention_mask[:, :, np.newaxis], token_embeddings.shape[2], axis=2)
+        sum_embeddings = np.sum(token_embeddings * input_mask_expanded, axis=1)
+        sum_mask = np.clip(np.sum(input_mask_expanded, axis=1), a_min=1e-9, a_max=None)
+        embeddings = sum_embeddings / sum_mask
+        
+        # L2 Normalize
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings.tolist()
+        
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self._encode(texts)
+        
+    def embed_query(self, text: str) -> List[float]:
+        return self._encode([text])[0]
 
 class RAGPipeline:
     """
@@ -35,10 +86,10 @@ class RAGPipeline:
         self,
         docs_dir: str = "data/docs",
         faiss_index_path: str = "data/faiss_index",
-        embedding_model_name: str = "all-MiniLM-L6-v2",
+        embedding_model_name: str = "models/embed_onnx", # Native ONNX explicitly built Path
         ollama_model: str = "llama3.2:1b", # Often exact tag in Ollama
-        chunk_size: int = 500,
-        chunk_overlap: int = 50
+        chunk_size: int = 600,
+        chunk_overlap: int = 150
     ):
         """
         Initializes models into memory to ensure zero cold-start latency.
@@ -53,10 +104,8 @@ class RAGPipeline:
         # 1. Load Local Embedding Model (Fast, small memory footprint ~90MB)
         # We use CPU explicitly.
         print(f"[RAG] Loading Embedding Model: {embedding_model_name}")
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=embedding_model_name,
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
+        self.embeddings = NativeONNXEmbeddings(
+            model_path=embedding_model_name
         )
 
         # 2. Load or Create FAISS Index
@@ -157,9 +206,9 @@ class RAGPipeline:
         self.vector_store.save_local(str(self.faiss_index_path))
         print(f"[RAG] FAISS index updated and saved to {self.faiss_index_path}.")
 
-    def get_context(self, user_query: str, top_k: int = 2) -> str:
-        """Lightweight method to just retrieve relevant chunks for external LLMs."""
-        if self.vector_store is None or not user_query:
+    @lru_cache(maxsize=128)
+    def _cached_similarity_search(self, user_query: str, top_k: int) -> str:
+        if self.vector_store is None:
             return ""
         try:
             docs = self.vector_store.similarity_search(user_query, k=top_k)
@@ -167,6 +216,12 @@ class RAGPipeline:
         except Exception as e:
             print(f"[RAG] Context retrieval error: {e}")
             return ""
+
+    def get_context(self, user_query: str, top_k: int = 2) -> str:
+        """Lightweight method to just retrieve relevant chunks for external LLMs."""
+        if self.vector_store is None or not user_query:
+            return ""
+        return self._cached_similarity_search(user_query.strip().lower(), top_k)
 
     def query(self, user_query: str, top_k: int = 3) -> str:
         """
