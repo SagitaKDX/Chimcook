@@ -255,12 +255,16 @@ class ComponentManager:
             from core.face_detector import FaceDetector, FaceDetectorConfig
 
             known_faces_path = Path(__file__).parent.parent / self.config.known_faces_dir
-            camera_index = int(os.environ.get("CAMERA_INDEX", 1))
-            print(f"      Camera index: {camera_index} (set CAMERA_INDEX env var to change)")
+
+            # Auto-detect by name; CAMERA_INDEX is an optional override
+            camera_name = os.environ.get("CAMERA_NAME", "DV20")
+            camera_index = int(os.environ.get("CAMERA_INDEX", 0))
+            print(f"      Camera name search: '{camera_name}' (override with CAMERA_NAME env var)")
 
             self.face_detector = FaceDetector(FaceDetectorConfig(
                 known_faces_dir=str(known_faces_path),
-                camera_index=camera_index,
+                camera_name=camera_name,
+                camera_index=camera_index,      # fallback if name not found
                 detection_interval_ms=self.config.face_detection_interval_ms,
                 enable_talking_detection=self.config.track_talking,
                 # Enable preprocessing for better detection

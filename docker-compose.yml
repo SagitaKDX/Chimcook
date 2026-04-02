@@ -46,7 +46,8 @@ services:
       - PULSE_COOKIE=/root/.config/pulse/cookie
       - XDG_RUNTIME_DIR=/run/user/1000
       - AUDIO_DEVICE=${AUDIO_DEVICE:-}
-      - CAMERA_INDEX=${CAMERA_INDEX:-1}  # Which /dev/videoN to use (1=USB composite camera)
+      - CAMERA_NAME=${CAMERA_NAME:-DV20}  # Auto-detect camera by V4L2 name (DV20=USB composite camera)
+      - CAMERA_INDEX=${CAMERA_INDEX:-0}   # Fallback index if name not found
       - DEBUG=${DEBUG:-1}        # 1 = show per-frame VAD prob bars; set to 0 to disable
       - SAVE_AUDIO=${SAVE_AUDIO:-0}
 
