@@ -449,11 +449,6 @@ class VoiceAssistant:
         record_ts = int(time.time() * 1000)
         item = (list(frames), list(raw_chunks), recordings_dir, record_ts)
         self._speech_q.put_nowait(item)
-        
-        # Play thinking phrase so user knows we heard them
-        chime_until = self._speech.play_thinking_chime()
-        if chime_until > self._muted_until:
-            self._muted_until = chime_until
 
     def _silero_vad_predict(self, frame: np.ndarray) -> float:
         """Return speech probability [0, 1] for a 512-sample frame."""

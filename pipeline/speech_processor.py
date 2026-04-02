@@ -252,23 +252,15 @@ class SpeechProcessor:
     
     def play_acknowledgment(self) -> float:
         """
-        Play wake word acknowledgment sound.
+        Speak a TTS acknowledgment when the wake word is triggered.
         
         Returns mute_until timestamp.
         """
-        import scipy.io.wavfile as wav
-        
-        ack_path = Path(__file__).parent.parent / "assets" / "wake_ack.wav"
-        
-        if ack_path.exists():
-            ack_sr, ack_audio = wav.read(str(ack_path))
-            if ack_audio.dtype == np.int16:
-                ack_audio = ack_audio.astype(np.float32) / 32768.0
-            self._audio_output.play(ack_audio, ack_sr)
-            return time.time() + 0.3  # Short mute after ack
-        
-        # No ack file - just return with minimal mute
-        return time.time() + 0.1
+        phrase = "I am listening."
+        if self.config.debug:
+            print(f"   [WakeWord: \"{phrase}\"]")
+            
+        return self.say(phrase)
     
     def play_thinking_chime(self, skip_speech: bool = False) -> float:
         """
@@ -284,8 +276,6 @@ class SpeechProcessor:
         end_time = time.time()
         if not skip_speech:
             phrase = "I'm thinking wait for me a moment."
-            if self.config.debug:
-                print(f"   [Thinking: \"{phrase}\"]")
                 
             # 1. Speak the acknowledgment (blocking natively)
             end_time = self.say(phrase)
@@ -293,6 +283,9 @@ class SpeechProcessor:
             # Wait briefly so it doesn't overlap exactly with the end of speech
             time.sleep(max(0, end_time - time.time() - 0.2))
             
+        # 2. Start the background looping sound
+        processing_path = _project_root / "assets" / "processing.wav"
+        if processing_path.exists():
             try:
                 proc_sr, proc_audio = wav.read(str(processing_path))
                 if proc_audio.dtype == np.int16:
