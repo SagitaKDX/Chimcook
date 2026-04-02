@@ -13,7 +13,11 @@ services:
     privileged: true
     devices:
       - /dev/snd:/dev/snd           # ALSA audio devices
-      - /dev/video0:/dev/video0     # Camera
+      - /dev/video0:/dev/video0     # Camera (built-in or index 0)
+      - /dev/video1:/dev/video1     # USB composite camera (if present)
+      - /dev/video2:/dev/video2     # USB composite camera sub-device
+      - /dev/video3:/dev/video3     # USB composite camera sub-device
+      - /dev/video4:/dev/video4     # USB composite camera sub-device
 
     # ── Resource limits (90 % of host CPU) ────────────────────────────────────
     # CPUS env var = number of CPU cores to allow (e.g. CPUS=7.2 for 8-core MiniPC)
@@ -42,6 +46,7 @@ services:
       - PULSE_COOKIE=/root/.config/pulse/cookie
       - XDG_RUNTIME_DIR=/run/user/1000
       - AUDIO_DEVICE=${AUDIO_DEVICE:-}
+      - CAMERA_INDEX=${CAMERA_INDEX:-1}  # Which /dev/videoN to use (1=USB composite camera)
       - DEBUG=${DEBUG:-1}        # 1 = show per-frame VAD prob bars; set to 0 to disable
       - SAVE_AUDIO=${SAVE_AUDIO:-0}
 

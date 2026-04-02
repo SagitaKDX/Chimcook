@@ -56,7 +56,8 @@ class FaceDetectorConfig:
     talking_frames_window: int = 5          # Frames to average for smoothing
     
     # Camera
-    camera_index: int = 0           # Camera device index
+    camera_index: int = 0           # Camera device index (used if camera_name not set)
+    camera_name: str = ""           # Auto-detect by substring match on V4L2 device name (e.g. "DV20")
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 15            # Lower FPS = less CPU
@@ -178,8 +179,34 @@ class FaceDetector:
         else:
             print(f"      No known faces loaded (add photos to {faces_dir}/)")
     
+    @staticmethod
+    def _find_index_by_name(name_keyword: str) -> int:
+        """
+        Scan /sys/class/video4linux/videoN/name for a device whose name
+        contains `name_keyword` (case-insensitive). Returns the first match index,
+        or -1 if nothing found.
+        """
+        import os
+        sysfs_base = "/sys/class/video4linux"
+        if not os.path.isdir(sysfs_base):
+            return -1
+        keyword = name_keyword.lower().replace(" ", "")
+        for entry in sorted(os.listdir(sysfs_base)):  # videoN sorted numerically
+            name_file = os.path.join(sysfs_base, entry, "name")
+            try:
+                with open(name_file) as f:
+                    device_name = f.read().strip().lower().replace(" ", "")
+                if keyword in device_name:
+                    # Extract index from 'videoN'
+                    idx = int(entry.replace("video", ""))
+                    print(f"      Auto-detected '{name_keyword}' → /dev/{entry} (index {idx})")
+                    return idx
+            except Exception:
+                continue
+        return -1
+
     def start(self) -> bool:
-        """Start video capture. Tries configured index first, then 0, 1, 2. Returns True if successful."""
+        """Start video capture. Auto-detects by camera_name if set, else tries camera_index. Returns True if successful."""
         if self._cap is not None:
             return True
 
@@ -187,30 +214,25 @@ class FaceDetector:
         import glob
         import stat
         import os
-        video_devices = glob.glob('/dev/video*')
+        video_devices = sorted(glob.glob('/dev/video*'))
         if not video_devices:
             print(f"      Error: No camera devices found (/dev/video*)")
             print(f"      Tip: Check if camera is connected and drivers are installed")
             return False
-        
+
         # Check permissions on first camera device
         try:
             first_device = video_devices[0]
-            device_stat = os.stat(first_device)
-            device_mode = stat.filemode(device_stat.st_mode)
             user_groups = os.getgroups()
-            
-            # Check if user can access the device
-            # Devices are typically owned by root:video with 0660 permissions
-            # User needs to be in 'video' group
             try:
                 import grp
                 video_gid = grp.getgrnam('video').gr_gid
                 has_video_group = video_gid in user_groups
             except (KeyError, ImportError):
                 has_video_group = False
-            
+
             if not has_video_group and not os.access(first_device, os.R_OK | os.W_OK):
+                device_mode = stat.filemode(os.stat(first_device).st_mode)
                 print(f"      Warning: Camera permissions issue detected")
                 print(f"      Device: {first_device} ({device_mode})")
                 print(f"      Fix: Add user to 'video' group:")
@@ -219,11 +241,18 @@ class FaceDetector:
         except Exception:
             pass  # Don't fail if permission check fails
 
+        # --- Auto-detect by name (highest priority) ---
+        preferred_index = self.config.camera_index
+        if self.config.camera_name:
+            detected = self._find_index_by_name(self.config.camera_name)
+            if detected >= 0:
+                preferred_index = detected
+            else:
+                print(f"      Warning: Camera '{self.config.camera_name}' not found, falling back to index {preferred_index}")
+
         indices_to_try = list(dict.fromkeys([
-            self.config.camera_index,
-            0,
-            1,
-            2,
+            preferred_index,
+            0, 1, 2, 3, 4,
         ]))
 
         # Try different backends in order of preference
