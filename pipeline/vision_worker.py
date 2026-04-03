@@ -167,7 +167,6 @@ class VisionWorker:
 
         if a._wake_word:
             a._wake_word._state.cooldown = a._muted_until
-            a._wake_word._model.reset()
 
         a._speech._audio_output.play(audio, sr)
         a._state = (
