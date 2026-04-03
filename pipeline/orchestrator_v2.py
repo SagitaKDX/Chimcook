@@ -280,30 +280,21 @@ class VoiceAssistant:
                     if gain != 1.0:
                         chunk = np.clip(chunk * gain, -1.0, 1.0).astype(np.float32)
 
-                    # 4. Handle Busy / Muted states securely
+                    # 4. Skip if TTS is playing or Assistant is busy
                     now = time.time()
                     if now < self._muted_until or self._state in (AssistantState.PROCESSING, AssistantState.SPEAKING):
                         self._was_muted = True
-                        
-                        # Drain face events
-                        self._drain_face_events()
-                        
-                        # Keep WakeWord buffers advancing with silence to prevent time-stitching delays!
-                        if self._wake_word:
-                            self._wake_word.process_frame(np.zeros_like(chunk), face_detected=False)
-                            
                         continue
 
                     if getattr(self, "_was_muted", False):
                         self._was_muted = False
                         if self._wake_word:
-                            # Full reset on unmute as a safeguard (clears preprocessor loops)
-                            self._wake_word.reset_full()
+                            self._wake_word._model.reset()
 
-                    # 5. Drain face events from vision thread
+                    # 5. Drain face events from vision thread (non-blocking)
                     self._drain_face_events()
 
-                    # 6. Wake word gate logic
+                    # 6. Wake word gate (Phase 3 logic)
                     gate_allows_wake = True
                     if (
                         self.config.require_face_for_wake_word
@@ -312,16 +303,18 @@ class VoiceAssistant:
                     ):
                         gate_allows_wake = self._is_user_present
 
-                    # 7. Wake word processing ALWAYS processes real audio to keep sync natively.
-                    ww_passed = self._handle_wake_word(chunk, face_detected=gate_allows_wake)
-                    
                     if not gate_allows_wake:
-                        # Feed the real audio into Silero buffer but skip VAD
+                        self._was_gate_closed = True
                         silero_buffer = np.concatenate([silero_buffer, chunk])
                         continue
 
-                    if not ww_passed:
-                        # Wake word has not triggered yet, so do not begin recording speech
+                    if getattr(self, "_was_gate_closed", False):
+                        self._was_gate_closed = False
+                        if self._wake_word:
+                            self._wake_word._model.reset()
+
+                    # 7. Wake word processing
+                    if not self._handle_wake_word(chunk, face_detected=True):
                         collected_frames = []
                         raw_chunks = []
                         is_recording = False
