@@ -139,16 +139,18 @@ class InferenceWorker:
         # 2. Start a Watchdog Thread to warn user if processing takes > 30s
         import threading
         first_sentence_played_event = threading.Event()
+        watchdog_lock = threading.Lock()
         
         def processing_watchdog():
             if not first_sentence_played_event.wait(30.0):
-                # If the event was NOT set within 30 seconds...
-                if not first_sentence_played_event.is_set():
-                    print("\n[Watchdog] Processing exceeded 30s, notifying user...")
-                    a._speech._audio_output.stop()
-                    a._speech.say("I am currently working, wait a moment.")
-                    # Restart just the background processing loop smoothly
-                    a._speech.play_thinking_chime(skip_speech=True)
+                with watchdog_lock:
+                    # If the event was NOT set within 30 seconds...
+                    if not first_sentence_played_event.is_set():
+                        print("\n[Watchdog] Processing exceeded 30s, notifying user...")
+                        a._speech._audio_output.stop()
+                        a._speech.say("I am currently working, wait a moment.")
+                        # Restart just the background processing loop smoothly
+                        a._speech.play_thinking_chime(skip_speech=True)
                     
         wd_thread = threading.Thread(target=processing_watchdog, daemon=True)
         wd_thread.start()
@@ -232,42 +234,53 @@ class InferenceWorker:
                 if re.search(r"[.!?]\s", sentence_buf):
                     sentence, sentence_buf = split_first_sentence(sentence_buf)
                     if sentence.strip():
-                        if not first_sentence_played:
-                            first_sentence_played = True
-                            first_sentence_played_event.set() # Stop 30s watchdog!
-                            llm_first_ms = int((time.time() - t1) * 1000)
-                            print(f"\r" + " " * 40 + "\r", end="")
-                            if a.config.debug:
-                                print(f"   [LLM first sentence: {llm_first_ms}ms]")
-                            print(f"🤖 Assistant: {sentence}", end=" ", flush=True)
-                        else:
-                            print(sentence, end=" ", flush=True)
+                        with watchdog_lock:
+                            if not first_sentence_played:
+                                first_sentence_played = True
+                                first_sentence_played_event.set() # Stop 30s watchdog!
+                                a._speech._audio_output.stop() # Stop thinking chime/watchdog Audio
+                                
+                                llm_first_ms = int((time.time() - t1) * 1000)
+                                print(f"\r" + " " * 40 + "\r", end="")
+                                if a.config.debug:
+                                    print(f"   [LLM first sentence: {llm_first_ms}ms]")
+                                print(f"🤖 Assistant: {sentence}", end=" ", flush=True)
+                            else:
+                                print(sentence, end=" ", flush=True)
 
-                        tts_audio, sr = a._speech._tts.synthesize(sentence)
-                        seg_dur = len(tts_audio) / sr
-                        audio_duration_total += seg_dur
-                        # Keep mic muted while this chunk plays
-                        a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
-                        a._speech._audio_output.play(tts_audio, sr)
+                            tts_audio, sr = a._speech._tts.synthesize(sentence)
+                            seg_dur = len(tts_audio) / sr
+                            audio_duration_total += seg_dur
+                            # Keep mic muted while this chunk plays
+                            a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
+                            a._speech._audio_output.play(tts_audio, sr)
 
         except Exception as e:
             print(f"\n[LLM stream error: {e}]")
 
         if sentence_buf.strip():
-            print(sentence_buf, end=" ", flush=True)
-            # NOTE: Do NOT append sentence_buf to full_response here — the tokens
-            # that make up this remainder were already individually appended during
-            # the streaming loop above.  Appending again would duplicate the text
-            # in conversation history and cause the LLM to repeat itself.
-            try:
-                tts_audio, sr = a._speech._tts.synthesize(sentence_buf)
-                seg_dur = len(tts_audio) / sr
-                audio_duration_total += seg_dur
-                # Keep mic muted while this chunk plays
-                a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
-                a._speech._audio_output.play(tts_audio, sr)
-            except Exception:
-                pass
+            with watchdog_lock:
+                if not first_sentence_played:
+                    first_sentence_played = True
+                    first_sentence_played_event.set()
+                    a._speech._audio_output.stop()
+                    llm_first_ms = int((time.time() - t1) * 1000)
+                    print(f"\r" + " " * 40 + "\r", end="")
+                    if a.config.debug:
+                        print(f"   [LLM first sentence: {llm_first_ms}ms]")
+                    print(f"🤖 Assistant: {sentence_buf}", end=" ", flush=True)
+                else:
+                    print(sentence_buf, end=" ", flush=True)
+                
+                try:
+                    tts_audio, sr = a._speech._tts.synthesize(sentence_buf)
+                    seg_dur = len(tts_audio) / sr
+                    audio_duration_total += seg_dur
+                    # Keep mic muted while this chunk plays
+                    a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
+                    a._speech._audio_output.play(tts_audio, sr)
+                except Exception:
+                    pass
 
         print()
 

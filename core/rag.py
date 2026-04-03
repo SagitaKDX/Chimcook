@@ -211,8 +211,12 @@ class RAGPipeline:
         if self.vector_store is None:
             return ""
         try:
-            docs = self.vector_store.similarity_search(user_query, k=top_k)
-            return "\n---\n".join([doc.page_content for doc in docs])
+            results = self.vector_store.similarity_search_with_score(user_query, k=top_k)
+            # Filter matches with L2 distance score > 0.35 (too far)
+            valid_docs = [doc.page_content for doc, score in results if score <= 0.35]
+            if not valid_docs:
+                return ""
+            return "\n---\n".join(valid_docs)
         except Exception as e:
             print(f"[RAG] Context retrieval error: {e}")
             return ""
@@ -239,10 +243,11 @@ class RAGPipeline:
 
         try:
             # 1. Similarity Search Fast Retrieval
-            retrieved_docs = self.vector_store.similarity_search(user_query, k=top_k)
+            results = self.vector_store.similarity_search_with_score(user_query, k=top_k)
             
             # 2. Format context
-            context_text = "\n---\n".join([doc.page_content for doc in retrieved_docs])
+            valid_docs = [doc.page_content for doc, score in results if score <= 0.35]
+            context_text = "\n---\n".join(valid_docs) if valid_docs else "No relevant context found in knowledge base."
             
             # 3. Construct Final Prompt
             formatted_prompt = self.prompt_template.format(
