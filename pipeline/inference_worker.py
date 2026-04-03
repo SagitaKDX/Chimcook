@@ -90,8 +90,8 @@ class InferenceWorker:
                     a._wake_word_soft_locked = False
                     if a._wake_word:
                         a._wake_word.deactivate(with_cooldown=True)
-                        a._wake_word._state.cooldown = time.time() + 8.0
-                        a._wake_word._model.reset()
+                        # Short cooldown — just long enough for goodbye TTS to finish
+                        a._wake_word._state.cooldown = time.time() + 3.0
                     a._state = AssistantState.WAKE_WORD_LISTENING
                     a._print_status()
                 elif a._wake_word:
@@ -182,7 +182,8 @@ class InferenceWorker:
         # Goodbye?
         from pipeline.speech_processor import GOODBYE_PHRASES
         if any(p in text.lower() for p in GOODBYE_PHRASES):
-            first_sentence_played_event.set() # Stop watchdog
+            first_sentence_played_event.set()   # Stop watchdog
+            a._speech._audio_output.stop()      # Stop thinking chime
             return a._speech._handle_goodbye()
 
         a._speech._add_to_history("user", text)
@@ -220,7 +221,11 @@ class InferenceWorker:
             context = rag_future.result()
             rag_executor.shutdown(wait=False)
             if context:
+                print(f"[RAG] ✅ Context found ({len(context)} chars) — injecting into prompt")
                 dynamic_prompt += f"\nFacts:\n{context}\nRules: 1. Use facts only. 2. English ONLY. 3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
+            else:
+                print(f"[RAG] ⚠️  No relevant context found in knowledge base for: '{text[:60]}'")
+
 
         try:
             for token in a._components.llm.generate_stream(

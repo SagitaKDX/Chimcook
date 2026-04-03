@@ -280,14 +280,11 @@ class VoiceAssistant:
                     if gain != 1.0:
                         chunk = np.clip(chunk * gain, -1.0, 1.0).astype(np.float32)
 
-                    # 4. Skip speech/VAD if TTS is playing or Assistant is busy.
-                    #    Feed SILENCE (not live mic) to OWW so its sliding-window
-                    #    stays warm without risking it hearing "Alexa" from the speaker.
+                    # 4. Skip everything (including OWW) while TTS is playing or
+                    #    assistant is busy. OWW buffers are preserved from before
+                    #    the greeting because _send_greeting no longer calls reset().
                     now = time.time()
                     if now < self._muted_until or self._state in (AssistantState.PROCESSING, AssistantState.SPEAKING):
-                        if self._wake_word and not self._wake_word.is_active:
-                            silence = np.zeros(len(chunk), dtype=np.int16)
-                            self._wake_word._model.predict(silence)
                         continue
 
                     # 5. Drain face events from vision thread (non-blocking)

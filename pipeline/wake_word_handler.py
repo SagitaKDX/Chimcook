@@ -60,7 +60,11 @@ class WakeWordHandler:
         self._state.is_active = False
         if with_cooldown:
             self._state.cooldown = time.time() + self.config.wake_word_cooldown_sec
-        self.reset_full()
+        # Only reset the prediction score history, NOT the audio feature buffers.
+        # Preserving mel/embedding buffers means OWW can detect again immediately
+        # after cooldown ends without needing a warm-up period.
+        if self._model:
+            self._model.reset()
     
     def extend_timeout(self) -> None:
         """Extend the wake word timeout."""
