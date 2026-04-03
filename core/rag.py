@@ -212,8 +212,8 @@ class RAGPipeline:
             return ""
         try:
             results = self.vector_store.similarity_search_with_score(user_query, k=top_k)
-            # Filter matches with L2 distance score > 0.8 (too far)
-            valid_docs = [doc.page_content for doc, score in results if score <= 0.8]
+            # Filter matches with L2 distance score > 1.2 (too far)
+            valid_docs = [doc.page_content for doc, score in results if score <= 1.2]
             if not valid_docs:
                 return ""
             return "\n---\n".join(valid_docs)
@@ -246,7 +246,7 @@ class RAGPipeline:
             results = self.vector_store.similarity_search_with_score(user_query, k=top_k)
             
             # 2. Format context
-            valid_docs = [doc.page_content for doc, score in results if score <= 0.8]
+            valid_docs = [doc.page_content for doc, score in results if score <= 1.2]
             context_text = "\n---\n".join(valid_docs) if valid_docs else "No relevant context found in knowledge base."
             
             # 3. Construct Final Prompt

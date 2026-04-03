@@ -203,9 +203,26 @@ class InferenceWorker:
         rag_executor = None
         if a._components.rag is not None:
             import concurrent.futures
-            # Keep pool alive just for this request
+            import re as _re
+
+            # Build a clean keyword query — strip conversational filler so the
+            # embedding model focuses on the actual topic (e.g. "Greenwich Vietnam history")
+            # rather than "can you tell me a little bit about the history of..."
+            filler_patterns = [
+                r"\b(can you|could you|please|tell me|i want to know|what (is|are|was|were)|"
+                r"do you know|i('d| would) like to know|a little bit about|"
+                r"give me|explain|describe|talk about|say something about)\b",
+            ]
+            rag_query = text
+            for pat in filler_patterns:
+                rag_query = _re.sub(pat, " ", rag_query, flags=_re.IGNORECASE)
+            rag_query = " ".join(rag_query.split())  # collapse whitespace
+            if not rag_query.strip():
+                rag_query = text  # fallback to original if everything got stripped
+
             rag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            rag_future = rag_executor.submit(a._components.rag.get_context, text, 3)
+            rag_future = rag_executor.submit(a._components.rag.get_context, rag_query, 3)
+
 
         history_for_llm = a._speech._conversation_history[:-1]
 
