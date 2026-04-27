@@ -1,30 +1,35 @@
-# Python cache / bytecode
+# === Python ===
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.egg-info/
+dist/
+build/
 
-# Virtual environments
+# === Virtual environments ===
 venv/
 .venv/
 
-# IDE / editor
+# === IDE / Editor ===
 .vscode/
 .idea/
-*.code-workspace
-
-# Logs & debug artifacts
-debug_audio/
-debug_frame.jpg
 .cursor/
-*.log
+*.code-workspace
+.cph/
 
-# Model & data caches (large, reproducible)
+# === Models & data (large, reproducible via download_models.sh) ===
 models/
 known_faces/
 recordings/
+data/faiss_index/
 
-# OS files
+# === Debug / runtime artifacts ===
+debug_audio/
+debug_frame.jpg
+*.log
+*.wav
+
+# === OS ===
 .DS_Store
 Thumbs.db
-

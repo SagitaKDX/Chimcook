@@ -63,9 +63,9 @@ from pipeline.speech_processor import SpeechProcessor
 from pipeline.tts_stream import load_earcon_from_assets
 from pipeline.wake_word_handler import WakeWordHandler
 
-# Modular workers
 from pipeline.vision_worker import VisionWorker
 from pipeline.inference_worker import InferenceWorker
+from pipeline.audio_loop import AudioLoop
 
 
 class VoiceAssistant:
@@ -113,9 +113,9 @@ class VoiceAssistant:
         self._wake_word_soft_locked = False
         self._session_until = 0.0
 
-        # ── Workers ──────────────────────────────────────────────────────────
         self._vision_worker = VisionWorker(self)
         self._inference_worker = InferenceWorker(self)
+        self._audio_loop = AudioLoop(self)
 
         # ── Silero VAD (loaded once, shared with audio thread) ───────────────
         print("[+] Loading Silero VAD...")
@@ -288,7 +288,7 @@ class VoiceAssistant:
                         continue
 
                     # 5. Drain face events from vision thread (non-blocking)
-                    self._drain_face_events()
+                    self._audio_loop.drain_face_events()
 
                     # 6. Wake word gate (Phase 3 logic)
                     gate_allows_wake = True
@@ -310,7 +310,7 @@ class VoiceAssistant:
                             self._wake_word._model.reset()
 
                     # 7. Wake word processing
-                    if not self._handle_wake_word(chunk, face_detected=True):
+                    if not self._audio_loop.handle_wake_word(chunk, face_detected=True):
                         collected_frames = []
                         raw_chunks = []
                         is_recording = False
@@ -319,10 +319,10 @@ class VoiceAssistant:
                         continue
 
                     # 8. Wake word timeout
-                    if self._check_wake_word_timeout():
+                    if self._audio_loop.check_wake_word_timeout():
                         if is_recording and collected_frames:
                             print("\n⏰ Processing speech before timeout...")
-                            self._enqueue_speech(collected_frames, raw_chunks, recordings_dir)
+                            self._audio_loop.enqueue_speech(collected_frames, raw_chunks, recordings_dir)
                         collected_frames = []
                         raw_chunks = []
                         is_recording = False
@@ -341,30 +341,12 @@ class VoiceAssistant:
                         frame_512 = silero_buffer[:512].copy()
                         silero_buffer = silero_buffer[512:]
 
-                        speech_prob = self._silero_vad_predict(frame_512)
+                        speech_prob = self._audio_loop.silero_vad_predict(frame_512)
                         is_speech = speech_prob >= SILERO_THRESHOLD
 
                         # Debug VAD logging
                         if self.config.debug:
-                            rms = float(np.sqrt(np.mean(frame_512.astype(np.float64) ** 2)))
-                            bar_len = min(30, int(rms * 200))
-                            bar = "█" * bar_len + "░" * (30 - bar_len)
-                            label = "SPEECH" if is_speech else "silence"
-                            print(
-                                f"\r  {label:8}  prob={int(speech_prob*100):3}%  [{bar}]",
-                                end="",
-                                flush=True,
-                            )
-                            agent_log(
-                                "VAD_LEVEL",
-                                "pipeline/orchestrator_v2.py:VAD_LOOP",
-                                "vad_level",
-                                {
-                                    "rms": rms,
-                                    "speech_prob": float(speech_prob),
-                                    "is_speech": bool(is_speech),
-                                },
-                            )
+                            self._audio_loop.log_vad_debug(frame_512, speech_prob, is_speech)
 
                         # ── Speech collection ──────────────────────────────
                         if is_speech:
@@ -386,12 +368,12 @@ class VoiceAssistant:
 
                             if len(collected_frames) >= self._max_frames:
                                 print("\n⚠️ Max duration reached")
-                                self._enqueue_speech(collected_frames, raw_chunks, recordings_dir)
+                                self._audio_loop.enqueue_speech(collected_frames, raw_chunks, recordings_dir)
                                 collected_frames = []
                                 raw_chunks = []
                                 is_recording = False
                                 silence_frame_count = 0
-                                self._silero_model.reset_states()
+                                self._audio_loop.reset_vad()
 
                         elif is_recording:
                             collected_frames.append(frame_512)
@@ -404,7 +386,7 @@ class VoiceAssistant:
                                 if speech_frames >= MIN_SPEECH_FRAMES:
                                     print()
                                     try:
-                                        self._enqueue_speech(
+                                        self._audio_loop.enqueue_speech(
                                             collected_frames, raw_chunks, recordings_dir
                                         )
                                     except queue.Full:
@@ -413,7 +395,7 @@ class VoiceAssistant:
                                 collected_frames = []
                                 raw_chunks = []
                                 silence_frame_count = 0
-                                self._silero_model.reset_states()
+                                self._audio_loop.reset_vad()
 
         finally:
             self.stop()
@@ -422,109 +404,6 @@ class VoiceAssistant:
             if self._wake_word:
                 self._wake_word.stop()
             self._components.stop()
-
-    # =========================================================================
-    # Helpers
-    # =========================================================================
-
-    def _drain_face_events(self) -> None:
-        """Non-blocking drain of face event queue (called from audio thread)."""
-        try:
-            while True:
-                self._face_event_q.get_nowait()
-        except queue.Empty:
-            pass
-
-    def _enqueue_speech(
-        self,
-        frames: List[np.ndarray],
-        raw_chunks: List[np.ndarray],
-        recordings_dir: Optional[Path],
-    ) -> None:
-        """Put collected speech onto inference queue."""
-        record_ts = int(time.time() * 1000)
-        item = (list(frames), list(raw_chunks), recordings_dir, record_ts)
-        self._speech_q.put_nowait(item)
-
-    def _silero_vad_predict(self, frame: np.ndarray) -> float:
-        """Return speech probability [0, 1] for a 512-sample frame."""
-        if len(frame) != 512:
-            frame = np.pad(frame, (0, max(0, 512 - len(frame)))) if len(frame) < 512 else frame[:512]
-        if frame.dtype != np.float32:
-            frame = frame.astype(np.float32)
-        tensor = torch.from_numpy(frame).float()
-        with torch.no_grad():
-            return float(self._silero_model(tensor.unsqueeze(0), SAMPLE_RATE).item())
-
-    def _handle_wake_word(self, frame: np.ndarray, face_detected: bool) -> bool:
-        """
-        Phase 3: WW_TRIGGERED log emitted on detection.
-        """
-        if not self._wake_word:
-            return True
-        if self._wake_word.is_active:
-            return True
-
-        score = self._wake_word.process_frame(frame, face_detected)
-        if score is not None:
-            print(f"\n[VERIFY: WW_TRIGGERED] ✨ Wake word detected! (confidence: {score:.2f})")
-            self._wake_word.activate()
-            self._session_until = time.time() + SESSION_DURATION_SEC
-            self._state = AssistantState.SPEAKING
-            self._muted_until = self._speech.play_acknowledgment()
-            self._state = AssistantState.IDLE
-            self._print_status("listening for your question...")
-            return True
-        return False
-
-    def _check_wake_word_timeout(self) -> bool:
-        if not self._wake_word or not self._wake_word.is_active:
-            return False
-        if self._wake_word.check_timeout():
-            print("\n⏰ Wake word timeout. Going back to sleep...")
-            self._wake_word.deactivate(with_cooldown=True)
-            self._wake_word._state.cooldown = max(
-                self._wake_word._state.cooldown,
-                time.time() + 3.0,
-            )
-            self._wake_word_soft_locked = False
-            self._state = AssistantState.WAKE_WORD_LISTENING
-            self._print_status()
-            self._silero_model.reset_states()
-            return True
-        return False
-
-    def _save_stage_recordings(
-        self,
-        record_ts: int,
-        raw_chunks: List[np.ndarray],
-        collected_frames: List[np.ndarray],
-        recordings_dir: Path,
-    ) -> None:
-        import wave as _wave
-        sr = SAMPLE_RATE
-
-        def _write(path: Path, audio: np.ndarray) -> None:
-            audio = np.asarray(audio, dtype=np.float32).flatten()
-            if not audio.size:
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with _wave.open(str(path), "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sr)
-                wf.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
-
-        if raw_chunks:
-            _write(
-                recordings_dir / "raw" / f"{record_ts}.wav",
-                np.concatenate([c.flatten().astype(np.float32) for c in raw_chunks]),
-            )
-        if collected_frames:
-            _write(
-                recordings_dir / "vad" / f"{record_ts}.wav",
-                np.concatenate([f.flatten().astype(np.float32) for f in collected_frames]),
-            )
 
     # =========================================================================
     # Utility / status

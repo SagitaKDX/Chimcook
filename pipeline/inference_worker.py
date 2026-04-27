@@ -30,6 +30,7 @@ import numpy as np
 from pipeline.constants import SESSION_DURATION_SEC, STOP_SENTINEL
 from pipeline.config import AssistantState, STATE_DISPLAY
 from pipeline.tts_stream import split_first_sentence
+from pipeline.rag_search import RAGSearch
 
 if TYPE_CHECKING:
     from pipeline.orchestrator_v2 import VoiceAssistant
@@ -124,7 +125,7 @@ class InferenceWorker:
         print(f"\rStatus: {STATE_DISPLAY[a._state]}...")
 
         if a.config.save_audio and recordings_dir is not None:
-            a._save_stage_recordings(record_ts, raw_chunks, collected_frames, recordings_dir)
+            a._audio_loop.save_stage_recordings(record_ts, raw_chunks, collected_frames, recordings_dir)
 
         # ── STT ──────────────────────────────────────────────────────────────
         audio = np.concatenate([f.astype(np.float32).flatten() for f in collected_frames])
@@ -188,61 +189,51 @@ class InferenceWorker:
 
         a._speech._add_to_history("user", text)
 
+        # ── RAG: try direct answer first (no LLM, <100ms) ─────────────────────
+        _rag = RAGSearch(a)
+        direct_answer, rag_score = _rag.direct_answer(text)
+        if direct_answer:
+            # Confident FAQ match — speak the chunk, skip LLM entirely
+            first_sentence_played_event.set()   # stop watchdog
+            a._speech._audio_output.stop()       # stop thinking chime
+            print(f"\n🤖 Assistant (direct): {direct_answer}")
+            a._speech._add_to_history("assistant", direct_answer)
+            tts_audio, sr = a._speech._tts.synthesize(direct_answer)
+            seg_dur = len(tts_audio) / sr
+            mute_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
+            a._muted_until = mute_until
+            a._speech._audio_output.play(tts_audio, sr)
+            if a._wake_word:
+                a._wake_word.reset_full()
+            print(f"[VERIFY: PROC_COMPLETE] (direct RAG: score={rag_score:.3f})")
+            return False, mute_until
+
         # ── LLM stream + TTS First-Byte-Out ─────────────────────────────────
+        # RAG context injected into system prompt via background fetch
         print("🤖 Thinking...", end="", flush=True)
         t1 = time.time()
+
+        import datetime
+        tz = datetime.timezone(datetime.timedelta(hours=7))
+        current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
+        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
+
+        # Get context for LLM prompt (uses hybrid search, cached)
+        context = _rag.get_context(text, top_k=3)
+        if context:
+            dynamic_prompt += (
+                f"\nFacts:\n{context}\n"
+                "Rules: 1. Use facts only. 2. English ONLY. "
+                "3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
+            )
+
+        history_for_llm = a._speech._conversation_history[:-1]
 
         sentence_buf = ""
         full_response: List[str] = []
         first_sentence_played = False
         mute_until = 0.0
         audio_duration_total = 0.0
-
-        # Start RAG in the background immediately to overlap with prompt prep overhead
-        rag_future = None
-        rag_executor = None
-        if a._components.rag is not None:
-            import concurrent.futures
-            import re as _re
-
-            # Build a clean keyword query — strip conversational filler so the
-            # embedding model focuses on the actual topic (e.g. "Greenwich Vietnam history")
-            # rather than "can you tell me a little bit about the history of..."
-            filler_patterns = [
-                r"\b(can you|could you|please|tell me|i want to know|what (is|are|was|were)|"
-                r"do you know|i('d| would) like to know|a little bit about|"
-                r"give me|explain|describe|talk about|say something about)\b",
-            ]
-            rag_query = text
-            for pat in filler_patterns:
-                rag_query = _re.sub(pat, " ", rag_query, flags=_re.IGNORECASE)
-            rag_query = " ".join(rag_query.split())  # collapse whitespace
-            if not rag_query.strip():
-                rag_query = text  # fallback to original if everything got stripped
-
-            rag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            rag_future = rag_executor.submit(a._components.rag.get_context, rag_query, 3)
-
-
-        history_for_llm = a._speech._conversation_history[:-1]
-
-        import datetime
-        tz = datetime.timezone(datetime.timedelta(hours=7))
-        current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
-        
-        # Dynamic prompt injection
-        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
-
-        # Build final prompt with RAG context
-        if rag_future is not None and rag_executor is not None:
-            context = rag_future.result()
-            rag_executor.shutdown(wait=False)
-            if context:
-                print(f"[RAG] ✅ Context found ({len(context)} chars) — injecting into prompt")
-                dynamic_prompt += f"\nFacts:\n{context}\nRules: 1. Use facts only. 2. English ONLY. 3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
-            else:
-                print(f"[RAG] ⚠️  No relevant context found in knowledge base for: '{text[:60]}'")
-
 
         try:
             for token in a._components.llm.generate_stream(
@@ -259,9 +250,8 @@ class InferenceWorker:
                         with watchdog_lock:
                             if not first_sentence_played:
                                 first_sentence_played = True
-                                first_sentence_played_event.set() # Stop 30s watchdog!
-                                a._speech._audio_output.stop() # Stop thinking chime/watchdog Audio
-                                
+                                first_sentence_played_event.set()  # Stop 30s watchdog
+                                a._speech._audio_output.stop()     # Stop thinking chime
                                 llm_first_ms = int((time.time() - t1) * 1000)
                                 print(f"\r" + " " * 40 + "\r", end="")
                                 if a.config.debug:
@@ -273,7 +263,6 @@ class InferenceWorker:
                             tts_audio, sr = a._speech._tts.synthesize(sentence)
                             seg_dur = len(tts_audio) / sr
                             audio_duration_total += seg_dur
-                            # Keep mic muted while this chunk plays
                             a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
                             a._speech._audio_output.play(tts_audio, sr)
 

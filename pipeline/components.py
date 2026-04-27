@@ -160,10 +160,10 @@ class ComponentManager:
         import os, math
         all_cores = os.cpu_count() or 4
         threads_90 = max(1, math.ceil(all_cores * 0.9))
-        print(f"[5/8] Speech-to-Text (base.en, {threads_90}/{all_cores} threads = 90%)...")
+        print(f"[5/8] Speech-to-Text (small.en, {threads_90}/{all_cores} threads = 90%)...")
         from core.stt import STT, STTConfig
         self.stt = STT(STTConfig(
-            model_size="base.en",    # English-only model
+            model_size="small.en",   # Upgraded from base.en — 3x better on accented English
             cpu_threads=threads_90,  # 90% of all MiniPC cores
             compute_type="int8",
             language="en",           # English-only
@@ -171,11 +171,11 @@ class ComponentManager:
         ))
     
     def _init_llm(self) -> None:
-        """Initialize language model."""
+        """Initialize language model (fallback for non-FAQ queries)."""
         import os, math
         all_cores = os.cpu_count() or 4
         threads_90 = max(1, math.ceil(all_cores * 0.9))
-        print(f"[6/8] Language Model (Qwen 2.5 3B, {threads_90}/{all_cores} threads = 90%)...")
+        print(f"[6/8] Language Model (LLM fallback, {threads_90}/{all_cores} threads = 90%)...")
         from core.llm import LLM, LLMConfig
         
         model_path = self.config.llm_model_path
@@ -184,26 +184,26 @@ class ComponentManager:
         
         self.llm = LLM(LLMConfig(
             model_path=model_path,
-            n_ctx=2048,
+            n_ctx=1024,             # Smaller context — FAQ doesn't need 2048
             n_threads=threads_90,   # 90% of all MiniPC cores
-            max_tokens=300,
+            max_tokens=150,         # Short answers for voice
         ))
     
     def _find_llm_model(self) -> str:
-        """Auto-detect LLM model path."""
+        """Auto-detect LLM model path. Prefers smallest model (1B > 3B > 8B)."""
         models_dir = Path(__file__).parent.parent / "models" / "llm"
+        if not models_dir.exists():
+            raise FileNotFoundError("No LLM model found. Download Llama 3.2 1B first.")
         
-        # Prefer Qwen 2.5 3B (faster on CPU)
-        qwen_files = list(models_dir.glob("*qwen*.gguf")) if models_dir.exists() else []
-        if qwen_files:
-            return str(qwen_files[0])
+        gguf_files = list(models_dir.glob("*.gguf"))
+        if not gguf_files:
+            raise FileNotFoundError("No LLM model found. Download Llama 3.2 1B first.")
         
-        # Fallback to any GGUF
-        gguf_files = list(models_dir.glob("*.gguf")) if models_dir.exists() else []
-        if gguf_files:
-            return str(gguf_files[0])
-        
-        raise FileNotFoundError("No LLM model found. Download one first.")
+        # Sort by file size — pick the smallest available model
+        gguf_files.sort(key=lambda p: p.stat().st_size)
+        chosen = gguf_files[0]
+        print(f"      Auto-selected: {chosen.name} ({chosen.stat().st_size / 1e9:.1f}GB)")
+        return str(chosen)
     
     def _init_tts(self) -> None:
         """Initialize text-to-speech."""

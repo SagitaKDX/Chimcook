@@ -115,7 +115,7 @@ print(f'✅ Verified: {p}')"
 RUN if [ ! -f .env ]; then cp .env.example .env; fi
 
 # Update .env with correct model paths
-RUN sed -i 's|^LLM_MODEL_PATH=.*|LLM_MODEL_PATH=models/llm/qwen2.5-3b-instruct-q4_k_m.gguf|' .env && \
+RUN sed -i 's|^LLM_MODEL_PATH=.*|LLM_MODEL_PATH=models/llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf|' .env && \
     sed -i 's|^TTS_MODEL_PATH=.*|TTS_MODEL_PATH=models/tts/en_US-hfc_female-medium.onnx|' .env
 
 # Environment
