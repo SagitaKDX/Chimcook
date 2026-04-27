@@ -421,25 +421,25 @@ class RAGPipeline:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def answer_direct(
-        self, user_query: str, top_k: int = 2
+        self, user_query: str, top_k: int = 1
     ) -> Tuple[str, float]:
         """
-        FAST PATH: Return the best-matching chunk directly WITHOUT LLM.
+        FAST PATH: Return the single best-matching chunk directly WITHOUT LLM.
 
-        Call this first. If confidence is good (score < DIRECT_ANSWER_THRESHOLD),
-        speak the chunk text directly via TTS. Falls through to LLM only when
-        the score is too low (question not well covered by the knowledge base).
+        Always returns only ONE chunk — combining multiple chunks produces
+        out-of-order, rambling answers when the query is vague.
+        The LLM path (get_context) handles multi-chunk synthesis correctly.
 
         Returns:
             (answer_text, combined_score)
-            score < 0.5  → excellent match, speak directly
+            score < 0.50 → excellent specific match, speak directly
             score < 0.75 → good match, speak directly
-            score >= 0.75 → poor match, fall through to LLM
+            score >= 0.75 → poor/vague match, fall through to LLM
         """
         if self.vector_store is None or not user_query.strip():
             return "", 999.0
 
-        results = self._hybrid_search(user_query, top_k=top_k)
+        results = self._hybrid_search(user_query, top_k=1)  # always single best
         if not results:
             return "", 999.0
 
@@ -448,14 +448,7 @@ class RAGPipeline:
         if best_score >= self.DIRECT_ANSWER_THRESHOLD:
             return "", best_score  # Not confident enough — let LLM handle it
 
-        # Combine top chunks if they're all close enough
-        answer_parts: List[str] = []
-        for doc, score in results:
-            if score < self.DIRECT_ANSWER_THRESHOLD + 0.1:
-                answer_parts.append(doc.page_content)
-
-        answer = "\n".join(answer_parts)
-        return answer, best_score
+        return best_doc.page_content, best_score
 
     @lru_cache(maxsize=128)
     def _cached_context(self, user_query: str, top_k: int) -> str:

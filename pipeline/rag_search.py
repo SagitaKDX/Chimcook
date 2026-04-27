@@ -56,8 +56,9 @@ _MD_HEADING   = re.compile(r"^#{1,6}\s+", re.MULTILINE)          # ## Heading
 _MD_BOLD_IT   = re.compile(r"\*{1,3}(.+?)\*{1,3}")               # **bold** / *italic*
 _MD_BRACKET   = re.compile(r"^\[.*?\]\s*", re.MULTILINE)          # [Title > Section] prefix
 _MD_BULLET    = re.compile(r"^[\*\-]\s+", re.MULTILINE)           # * bullet or - bullet
-_MD_LINK      = re.compile(r"\[([^\]]+)\]\([^)]+\)")             # [text](url)
+_MD_LINK      = re.compile(r"\[([^\]]+)\]\([^)]+\)")              # [text](url)
 _MD_BACKTICK  = re.compile(r"`+(.+?)`+")                          # `inline code`
+_MD_SECTION_NUM = re.compile(r"^\d+(\.\d+)*\s+", re.MULTILINE)   # "1.3 " / "2.1.4 " prefixes
 _MULTI_NL     = re.compile(r"\n{3,}")
 
 # Set True to print raw FAISS + BM25 scores on every query (useful when tuning)
@@ -84,6 +85,7 @@ def _strip_markdown(text: str) -> str:
     """
     t = _MD_BRACKET.sub("", text)      # remove [Title > Section] prefixes
     t = _MD_HEADING.sub("", t)         # remove ## markers (keep heading text)
+    t = _MD_SECTION_NUM.sub("", t)     # remove "1.3 " / "2.1.4 " section numbering
     t = _MD_LINK.sub(r"\1", t)         # [text](url) → text
     t = _MD_BOLD_IT.sub(r"\1", t)      # **bold** / *italic* → plain text
     t = re.sub(r"\*+", "", t)          # mop up any remaining lone asterisks (**Key:** edge case)
