@@ -96,6 +96,96 @@ def _strip_markdown(text: str) -> str:
     return t.strip()
 
 
+# ── Spoken-language formatter ─────────────────────────────────────────────────
+# Converts numbered list items to ordinal words for natural TTS output
+_NUMBERED_STEP = re.compile(r"^(\d+)\.\s+", re.MULTILINE)
+_ORDINALS = {"1": "First, ", "2": "Next, ", "3": "Then, ",
+             "4": "After that, ", "5": "Also, ", "6": "Finally, "}
+
+
+def _format_for_speech(raw_chunk: str) -> str:
+    """
+    Convert a raw markdown chunk into natural spoken language.
+
+    Pipeline
+    --------
+    1. Strip all markdown syntax
+    2. Extract the first line as a topic title and make it a natural intro
+    3. Remove standalone sub-section header lines (short title-case labels)
+    4. Trim chunk bleed — drop a trailing line that is a new top-level heading
+    5. Convert '1. text' → 'First, text', '2. text' → 'Next, text' ...
+    6. Join into flowing prose (single space between lines)
+
+    Examples
+    --------
+    Raw:  'Scholarship Opportunities\nThe 2026 fund is 250 Billion.\nGreen Talent: 20-100%.\n4. Registration Steps'
+    Out:  'Regarding scholarship opportunities: The 2026 fund is 250 Billion. Green Talent: 20 to 100 percent.'
+
+    Raw:  'Online Registration\n1. Prepare your ID.\n2. Pay the fee.\n3. Confirmation within 2 weeks.'
+    Out:  'Here is how to register online: First, prepare your I D. Next, pay the fee. Then, confirmation within 2 weeks.'
+    """
+    clean = _strip_markdown(raw_chunk)
+    if not clean:
+        return ""
+
+    lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+
+    def _is_heading_like(line: str) -> bool:
+        """True if the line looks like a section title rather than a sentence."""
+        words = line.split()
+        return (
+            1 <= len(words) <= 7
+            and not line.endswith(".")
+            and not line.endswith("?")
+            and not line.endswith(",")
+            and not _NUMBERED_STEP.match(line)
+        )
+
+    # Step 2: use first line as natural intro if it looks like a heading
+    first, rest = lines[0], lines[1:]
+    if _is_heading_like(first) and rest:
+        intro = f"Regarding {first.lower().rstrip(':')}: "
+        lines = rest
+    else:
+        intro = ""
+        lines = [first] + rest
+
+    # Step 3: remove standalone sub-section headers inside the body
+    # e.g. "Online Registration", "Required Documents" on their own line
+    def _is_sub_header(line: str) -> bool:
+        words = line.split()
+        return (
+            1 <= len(words) <= 5
+            and not line.endswith(".")
+            and not line.endswith(",")
+            and not re.search(r"\d", line)
+            and not _NUMBERED_STEP.match(line)
+            and all(w[0].isupper() for w in words if w)
+        )
+
+    lines = [ln for ln in lines if not _is_sub_header(ln)] or lines
+
+    # Step 4: trim chunk bleed — drop trailing heading-like line from the next section
+    if len(lines) > 1 and _is_heading_like(lines[-1]):
+        lines = lines[:-1]
+
+    # Step 5: convert numbered steps to ordinal words
+    result: list = []
+    for ln in lines:
+        m = _NUMBERED_STEP.match(ln)
+        if m:
+            num = m.group(1)
+            body = ln[m.end():]
+            result.append(_ORDINALS.get(num, f"Step {num}, ") + body)
+        else:
+            result.append(ln)
+
+    # Step 6: join into flowing prose
+    return (intro + " ".join(result)).strip()
+
+
 class RAGSearch:
     """
     Thin wrapper around RAGPipeline that handles query cleaning and the
@@ -168,13 +258,13 @@ class RAGSearch:
             print(f"[RAG direct] query='{query}' score={score:.3f} ({elapsed_ms}ms)")
 
         if answer and score < self.DIRECT_SCORE_THRESHOLD:
-            # Strip markdown so TTS speaks clean prose, not "hashtag hashtag..." or "asterisk..."
-            clean_answer = _strip_markdown(answer)
+            # Format as natural spoken prose — no LLM, zero latency
+            spoken = _format_for_speech(answer)
             print(
                 f"[RAG] ⚡ Direct answer — score={score:.3f}, {elapsed_ms}ms "
                 f"(skipping LLM)"
             )
-            return clean_answer, score
+            return spoken, score
 
         return "", score
 
