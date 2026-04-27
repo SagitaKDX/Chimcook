@@ -49,8 +49,49 @@ _FILLER_PATTERN = re.compile(
 # ── University alias normalisation ────────────────────────────────────────────
 _UNI_PATTERN = re.compile(r"\b(?:my )?university\b", flags=re.IGNORECASE)
 
+# ── Markdown stripping patterns ───────────────────────────────────────────────
+# Removes all markdown syntax so TTS speaks clean prose instead of
+# "hashtag hashtag Greenwich Vietnam" or "asterisk asterisk bold asterisk asterisk"
+_MD_HEADING   = re.compile(r"^#{1,6}\s+", re.MULTILINE)          # ## Heading
+_MD_BOLD_IT   = re.compile(r"\*{1,3}(.+?)\*{1,3}")               # **bold** / *italic*
+_MD_BRACKET   = re.compile(r"^\[.*?\]\s*", re.MULTILINE)          # [Title > Section] prefix
+_MD_BULLET    = re.compile(r"^[\*\-]\s+", re.MULTILINE)           # * bullet or - bullet
+_MD_LINK      = re.compile(r"\[([^\]]+)\]\([^)]+\)")             # [text](url)
+_MD_BACKTICK  = re.compile(r"`+(.+?)`+")                          # `inline code`
+_MULTI_NL     = re.compile(r"\n{3,}")
+
 # Set True to print raw FAISS + BM25 scores on every query (useful when tuning)
 DEBUG_SCORES: bool = False
+
+
+def _strip_markdown(text: str) -> str:
+    """
+    Convert raw markdown chunk text to clean TTS-ready prose.
+
+    Removes:
+      - [Title > Section] chunk prefixes injected by section-aware splitter
+      - # ## ### headings markers
+      - **bold**, *italic*, ***both*** markers (keeps the inner text)
+      - * bullet / - bullet list markers
+      - [text](url) links (keeps link text)
+      - `inline code` backticks (keeps inner text)
+      - Excess blank lines
+
+    Example
+    -------
+    "### 3.2 Scholarship Opportunities\n* **Green Talent:** 50% fee reduction."
+        → "Scholarship Opportunities\nGreen Talent: 50% fee reduction."
+    """
+    t = _MD_BRACKET.sub("", text)      # remove [Title > Section] prefixes
+    t = _MD_HEADING.sub("", t)         # remove ## markers (keep heading text)
+    t = _MD_LINK.sub(r"\1", t)         # [text](url) → text
+    t = _MD_BOLD_IT.sub(r"\1", t)      # **bold** / *italic* → plain text
+    t = re.sub(r"\*+", "", t)          # mop up any remaining lone asterisks (**Key:** edge case)
+    t = _MD_BULLET.sub("", t)          # remove bullet markers
+    t = _MD_BACKTICK.sub(r"\1", t)     # `code` → code
+    t = "\n".join(line.lstrip() for line in t.splitlines())  # remove indent left by bullet removal
+    t = _MULTI_NL.sub("\n\n", t)       # collapse 3+ blank lines
+    return t.strip()
 
 
 class RAGSearch:
@@ -125,11 +166,13 @@ class RAGSearch:
             print(f"[RAG direct] query='{query}' score={score:.3f} ({elapsed_ms}ms)")
 
         if answer and score < self.DIRECT_SCORE_THRESHOLD:
+            # Strip markdown so TTS speaks clean prose, not "hashtag hashtag..." or "asterisk..."
+            clean_answer = _strip_markdown(answer)
             print(
                 f"[RAG] ⚡ Direct answer — score={score:.3f}, {elapsed_ms}ms "
                 f"(skipping LLM)"
             )
-            return answer, score
+            return clean_answer, score
 
         return "", score
 
