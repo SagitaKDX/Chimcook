@@ -85,42 +85,19 @@ class ComponentManager:
         print("=" * 60)
     
     def _init_audio_input(self) -> None:
-        """Initialize audio input."""
+        """Audio input is managed directly by sounddevice in orchestrator_v2.run()."""
         print("\n[1/8] Audio Input...")
-        from core.audio_input import AudioInput, AudioInputConfig
-        
-        self.audio_input = AudioInput(AudioInputConfig(
-            sample_rate=self.config.sample_rate,
-            channels=self.config.channels,
-            frame_ms=self.config.frame_ms,
-            device=self.config.audio_device,
-            mic_gain=getattr(self.config, 'mic_gain', 1.2),
-        ))
+        print("      (managed by sounddevice in audio loop)")
     
     def _init_noise_reducer(self) -> None:
-        """Initialize noise reducer."""
+        """Noise reduction — disabled; feature removed."""
         print("[2/8] Noise Reduction...")
-        
-        if self.config.enable_noise_reduction:
-            from core.noise_reduction import NoiseReducer, NoiseReducerConfig
-            self.noise_reducer = NoiseReducer(NoiseReducerConfig(adaptive=True))
-        else:
-            print("      (disabled)")
-    
+        print("      (disabled)")
+
     def _init_speaker_isolator(self) -> None:
-        """Initialize speaker isolator."""
+        """Speaker isolation — disabled; feature removed."""
         print("[3/8] Speaker Isolation...")
-        
-        if self.config.enable_speaker_isolation:
-            from core.speaker_isolation import SpeakerIsolator, SpeakerIsolatorConfig
-            self.speaker_isolator = SpeakerIsolator(SpeakerIsolatorConfig(
-                volume_threshold=0.10,
-                volume_margin=0.25,
-                min_frames_to_lock=2,
-                release_silence_frames=30,
-            ))
-        else:
-            print("      (disabled - using wake word instead)")
+        print("      (disabled - using wake word instead)")
     
     def _init_vad(self) -> None:
         """Initialize voice activity detection."""
