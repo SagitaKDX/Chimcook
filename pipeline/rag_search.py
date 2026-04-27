@@ -208,9 +208,12 @@ class RAGSearch:
         speak(reply)
     """
 
-    # L2-distance threshold for the direct answer fast path.
-    # score < this  → answer is confident enough, skip LLM entirely.
-    # score >= this → fall through to LLM.
+    # L2-distance threshold for what answer_direct() considers "good enough to return".
+    # NOTE: inference_worker applies a tighter gate (score < 0.45) to decide whether
+    # to actually skip the LLM. Scores 0.45-0.75 still go to LLM + RAG context.
+    # score < 0.45  → single-topic specific hit, skip LLM (ultra fast)
+    # score < 0.75  → broad/multi-topic, LLM synthesizes from 3 RAG chunks
+    # score >= 0.75 → no good match, LLM answers from general knowledge
     DIRECT_SCORE_THRESHOLD: float = 0.75
 
     def __init__(self, assistant) -> None:

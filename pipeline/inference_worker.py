@@ -190,10 +190,11 @@ class InferenceWorker:
         a._speech._add_to_history("user", text)
 
         # ── RAG: try direct answer first (no LLM, <100ms) ─────────────────────
+        # Only skip the LLM for very high-confidence SINGLE-TOPIC matches.
+        # Multi-topic questions (score 0.45-0.75) go to the LLM for synthesis.
         _rag = RAGSearch(a)
         direct_answer, rag_score = _rag.direct_answer(text)
-        if direct_answer:
-            # Confident FAQ match — speak the chunk, skip LLM entirely
+        if direct_answer and rag_score < 0.45:   # ultra-specific match only
             first_sentence_played_event.set()   # stop watchdog
             a._speech._audio_output.stop()       # stop thinking chime
             print(f"\n🤖 Assistant (direct): {direct_answer}")
@@ -209,22 +210,35 @@ class InferenceWorker:
             return False, mute_until
 
         # ── LLM stream + TTS First-Byte-Out ─────────────────────────────────
-        # RAG context injected into system prompt via background fetch
         print("🤖 Thinking...", end="", flush=True)
         t1 = time.time()
 
         import datetime
         tz = datetime.timezone(datetime.timedelta(hours=7))
         current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
-        dynamic_prompt = f"{a.config.system_prompt}\nThe current date and time is {current_time}."
 
-        # Get context for LLM prompt (uses hybrid search, cached)
+        # Get RAG context — up to 3 chunks covering different aspects of the query
         context = _rag.get_context(text, top_k=3)
+
+        # Tight system prompt: forces short, spoken-language answers from the 1B model.
+        # The 1B model tends to ramble — 2-4 sentences is ideal for TTS output.
+        dynamic_prompt = (
+            f"{a.config.system_prompt}\n"
+            f"The current date and time is {current_time}.\n"
+        )
         if context:
             dynamic_prompt += (
-                f"\nFacts:\n{context}\n"
-                "Rules: 1. Use facts only. 2. English ONLY. "
-                "3. REPEAT PHONETICS EXACTLY (output 'G P A', not 'GPA'; '20 percent', not '20%')."
+                f"Relevant facts from the knowledge base:\n{context}\n\n"
+                "Instructions: Answer using ONLY the facts above. "
+                "Be concise — 2 to 4 spoken sentences maximum. "
+                "Do NOT use lists, bullet points, or markdown. "
+                "Speak in plain conversational English. "
+                "Write phonetics in full: say 'G P A', '20 percent', 'Vietnam Dong' — never use symbols."
+            )
+        else:
+            dynamic_prompt += (
+                "Instructions: Answer briefly in 2 to 3 sentences. "
+                "Do NOT use lists or markdown. Plain conversational English only."
             )
 
         history_for_llm = a._speech._conversation_history[:-1]
