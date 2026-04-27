@@ -34,10 +34,17 @@ Debugging tips
 from __future__ import annotations
 
 import queue
+import sys
 import time
 import wave as _wave
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
+
+# ── Path setup (needed when run as: python3 pipeline/audio_loop.py) ──────────
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+# ─────────────────────────────────────────────────────────────────────────────
 
 import numpy as np
 import torch
