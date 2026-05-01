@@ -2,30 +2,25 @@
 """
 scripts/debug_face.py
 =====================
-Standalone face detection debugger for Chimcook.
+Standalone face detection debugger — uses the same FaceDetector class
+as the main assistant so camera opening is identical.
 
-Usage (on HOST, outside Docker — needs a display):
-    python3 scripts/debug_face.py [--camera 0] [--scale 0.5] [--no-gui]
+IMPORTANT: Stop the main container first, then run this:
+    sudo docker compose down
+    sudo docker run --rm -it --privileged \
+        --device /dev/video0 --device /dev/video4 \
+        -v $(pwd)/core:/app/core \
+        -v $(pwd)/pipeline:/app/pipeline \
+        -v $(pwd)/scripts:/app/scripts \
+        -v $(pwd)/known_faces:/app/known_faces \
+        chimcook-assistant \
+        python3 /app/scripts/debug_face.py --no-gui
 
-Usage (inside Docker — text-only mode, no display needed):
-    sudo docker exec -it chimcook-assistant python3 /app/scripts/debug_face.py --no-gui
+OR just run it directly from the stopped container:
+    sudo docker compose down
+    sudo docker compose run --rm assistant python3 /app/scripts/debug_face.py --no-gui
 
-What it shows
--------------
-• Live camera preview with HOG bounding boxes drawn in green
-• Frame number, FPS, detection count printed every second
-• In --no-gui mode: prints detection results to terminal only
-
-Controls (GUI mode)
--------------------
-  q   — quit
-  s   — save a snapshot to /tmp/debug_face_snap.jpg
-  +/- — increase / decrease HOG upsampling (more = finds smaller faces, slower)
-
-Interpreting results
---------------------
-  HOG = 0 faces → camera image is too dark/blurry/far, or person is at wrong angle
-  HOG = 1+ faces → detection working — check FACE_STABLE_FRAMES in constants.py
+Text-only output (--no-gui): works inside Docker without a display.
 """
 
 import argparse
@@ -33,185 +28,181 @@ import sys
 import time
 from pathlib import Path
 
-# ── Path setup (works whether run from project root or scripts/) ──────────────
+# ── Path setup ────────────────────────────────────────────────────────────────
 _root = Path(__file__).parent.parent
 sys.path.insert(0, str(_root))
-
-import cv2
-import face_recognition
-import numpy as np
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Chimcook face detection debugger")
     p.add_argument("--camera", type=int, default=0,
-                   help="Camera index (default: 0)")
-    p.add_argument("--scale", type=float, default=0.5,
-                   help="Downscale factor for detection (0.5 = half res, faster)")
+                   help="Camera index override (default: auto-detect)")
+    p.add_argument("--camera-name", default="DV20",
+                   help="Camera name substring to search in /sys (default: DV20)")
     p.add_argument("--upsample", type=int, default=1,
-                   help="HOG upsample passes (1=normal, 2=finds small faces, slower)")
+                   help="HOG upsample passes — 1=normal, 2=finds smaller faces (default: 1)")
+    p.add_argument("--scale", type=float, default=0.5,
+                   help="Downscale factor for detection (default: 0.5)")
     p.add_argument("--no-gui", action="store_true",
-                   help="Text-only mode — no OpenCV window (use inside Docker)")
-    p.add_argument("--brightness", type=float, default=1.2,
-                   help="Brightness multiplier applied before detection (default: 1.2)")
-    p.add_argument("--beta", type=int, default=20,
-                   help="Brightness offset applied before detection (default: 20)")
+                   help="Text-only mode — no window (required inside Docker)")
+    p.add_argument("--duration", type=int, default=30,
+                   help="How many seconds to run (default: 30, 0=forever)")
     return p.parse_args()
-
-
-def preprocess(frame: np.ndarray, alpha: float, beta: int) -> np.ndarray:
-    """Apply brightness + contrast enhancement, same as FaceDetector in components.py."""
-    bright = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-    # CLAHE contrast
-    lab = cv2.cvtColor(bright, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    bright = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
-    # Sharpen
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    return cv2.filter2D(bright, -1, kernel)
 
 
 def main():
     args = parse_args()
-    gui = not args.no_gui
 
     print(f"\n{'='*60}")
     print(f"  Chimcook Face Detection Debugger")
     print(f"{'='*60}")
-    print(f"  Camera index : {args.camera}")
-    print(f"  Scale factor : {args.scale}  (detection resolution)")
-    print(f"  HOG upsample : {args.upsample}")
-    print(f"  Brightness   : alpha={args.brightness}, beta={args.beta}")
-    print(f"  GUI mode     : {'YES (press q to quit)' if gui else 'NO (Ctrl+C to stop)'}")
+    print(f"  Camera index   : {args.camera}")
+    print(f"  Camera name    : '{args.camera_name}'")
+    print(f"  HOG upsample   : {args.upsample}")
+    print(f"  Scale factor   : {args.scale}")
+    print(f"  GUI mode       : {'NO (text only)' if args.no_gui else 'YES'}")
+    print(f"  Run duration   : {args.duration}s (0=forever)")
     print(f"{'='*60}\n")
 
-    # ── Open camera ──────────────────────────────────────────────────────────
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open camera index {args.camera}")
-        print("        Available cameras — try indices 0, 1, 2, 4:")
-        for i in range(5):
-            t = cv2.VideoCapture(i)
-            if t.isOpened():
-                print(f"          [{i}] ✓")
-                t.release()
-            else:
-                print(f"          [{i}] ✗")
+    # ── Check /dev/video* devices first ──────────────────────────────────────
+    import glob
+    video_devs = sorted(glob.glob("/dev/video*"))
+    if not video_devs:
+        print("[ERROR] No /dev/video* devices found in container!")
+        print("        Make sure docker-compose.yml has 'devices:' entries and")
+        print("        the container is started with --privileged or the device mounted.")
+        sys.exit(1)
+    print(f"[Device check] Found: {', '.join(video_devs)}")
+
+    # Check /sys for V4L2 camera names
+    import os
+    sysfs = "/sys/class/video4linux"
+    if os.path.isdir(sysfs):
+        print("[Device names]")
+        for entry in sorted(os.listdir(sysfs)):
+            name_file = os.path.join(sysfs, entry, "name")
+            try:
+                name = open(name_file).read().strip()
+                print(f"  /dev/{entry} → '{name}'")
+            except Exception:
+                print(f"  /dev/{entry} → (unknown)")
+    print()
+
+    # ── Load FaceDetector (same class as the main assistant) ──────────────────
+    try:
+        from core.face_detector import FaceDetector, FaceDetectorConfig
+    except ImportError as e:
+        print(f"[ERROR] Cannot import FaceDetector: {e}")
         sys.exit(1)
 
-    # Read one frame to confirm resolution
-    ret, frame = cap.read()
-    if not ret:
-        print("[ERROR] Camera opened but cannot read frames")
+    cfg = FaceDetectorConfig(
+        camera_index=args.camera,
+        camera_name=args.camera_name,
+        detection_scale=args.scale,
+        camera_width=640,
+        camera_height=480,
+        camera_fps=15,
+        enhance_brightness=True,
+        brightness_alpha=1.2,
+        brightness_beta=20,
+        enhance_contrast=True,
+        clahe_clip_limit=2.0,
+        clahe_tile_size=8,
+        denoise=False,   # Off for debug speed (slow on CPU)
+        sharpen=True,
+        detection_interval_ms=0,  # No throttle in debug mode
+    )
+
+    detector = FaceDetector(cfg)
+
+    print("[Starting camera...]")
+    if not detector.start():
+        print("\n[ERROR] Camera failed to open. Diagnose:")
+        print("  1. Is the main assistant running? If so, stop it first:")
+        print("     sudo docker compose down")
+        print("  2. Check devices: ls -la /dev/video*")
+        print("  3. Re-run with different --camera N (try 0, 1, 2, 4)")
         sys.exit(1)
 
-    h, w = frame.shape[:2]
-    print(f"[Camera] Resolution: {w}x{h}")
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    print("[Camera open] ✅ Running detection loop...\n")
+    print(f"{'Frame':>8}  {'FPS':>5}  {'Faces':>5}  {'Hit%':>5}  {'Name'}")
+    print("-" * 50)
 
-    upsample = args.upsample
-    frame_count = 0
-    detect_count = 0
-    last_report = time.time()
-    fps_frames = 0
+    frame_n = 0
+    hit_n = 0
+    t_start = time.time()
+    t_window = time.time()
+    window_frames = 0
+    window_hits = 0
     fps = 0.0
 
-    print("[Running] Detecting faces... (Ctrl+C or 'q' in window to stop)\n")
+    gui = not args.no_gui
+    if gui:
+        try:
+            import cv2 as _cv2
+        except ImportError:
+            print("[WARN] cv2 not available on host — falling back to --no-gui")
+            gui = False
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[WARN] Frame read failed — skipping")
-                time.sleep(0.05)
-                continue
+            elapsed_total = time.time() - t_start
+            if args.duration > 0 and elapsed_total >= args.duration:
+                print(f"\n[Done] {args.duration}s elapsed.")
+                break
 
-            frame_count += 1
-            fps_frames += 1
+            result = detector.process_frame()
+            frame_n += 1
+            window_frames += 1
 
-            # ── Preprocess (mirrors FaceDetector in components.py) ────────────
-            processed = preprocess(frame, args.brightness, args.beta)
+            if result.face_count > 0:
+                hit_n += 1
+                window_hits += 1
 
-            # ── Downscale for faster detection ────────────────────────────────
-            small = cv2.resize(processed, (0, 0), fx=args.scale, fy=args.scale)
-            rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
-            # ── HOG face detection ────────────────────────────────────────────
-            locations = face_recognition.face_locations(
-                rgb_small,
-                number_of_times_to_upsample=upsample,
-                model="hog",
-            )
-
-            n_faces = len(locations)
-            if n_faces > 0:
-                detect_count += 1
-
-            # ── FPS calc (every 1s) ───────────────────────────────────────────
+            # ── FPS + report every second ─────────────────────────────────────
             now = time.time()
-            if now - last_report >= 1.0:
-                fps = fps_frames / (now - last_report)
-                hit_rate = detect_count / max(frame_count, 1) * 100
+            if now - t_window >= 1.0:
+                fps = window_frames / (now - t_window)
+                hit_rate = window_hits / max(window_frames, 1) * 100
+                name = result.recognized_name or ("FACE" if result.face_count > 0 else "none")
+                symbol = "✅" if result.face_count > 0 else "❌"
                 print(
-                    f"[Frame {frame_count:5d}]  "
-                    f"FPS: {fps:.1f}  |  "
-                    f"Faces this frame: {n_faces}  |  "
-                    f"Detection rate: {hit_rate:.0f}%  |  "
-                    f"Upsample: {upsample}"
+                    f"{frame_n:>8}  {fps:>5.1f}  "
+                    f"{result.face_count:>5}  {hit_rate:>4.0f}%  "
+                    f"{symbol} {name}"
                 )
-                fps_frames = 0
-                detect_count = 0
-                frame_count = 0
-                last_report = now
-
-            if gui:
-                # ── Draw bounding boxes on the ORIGINAL frame ─────────────────
-                inv_scale = 1.0 / args.scale
-                for top, right, bottom, left in locations:
-                    # Scale back to original resolution
-                    t = int(top    * inv_scale)
-                    r = int(right  * inv_scale)
-                    b = int(bottom * inv_scale)
-                    l = int(left   * inv_scale)
-                    color = (0, 255, 0) if n_faces > 0 else (0, 0, 255)
-                    cv2.rectangle(frame, (l, t), (r, b), color, 2)
-                    cv2.putText(frame, "HOG FACE", (l, t - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-                # ── HUD overlay ───────────────────────────────────────────────
-                status = f"Faces: {n_faces}  FPS: {fps:.1f}  Upsample: {upsample}"
-                cv2.putText(frame, status, (10, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (0, 255, 0) if n_faces > 0 else (0, 80, 255), 2)
-
-                cv2.imshow("Chimcook — Face Debug (q=quit, +/-=upsample, s=snap)", frame)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("\n[Quit] User pressed q")
-                    break
-                elif key == ord('+') or key == ord('='):
-                    upsample = min(upsample + 1, 3)
-                    print(f"[+] Upsample increased to {upsample}")
-                elif key == ord('-'):
-                    upsample = max(upsample - 1, 0)
-                    print(f"[-] Upsample decreased to {upsample}")
-                elif key == ord('s'):
-                    snap_path = "/tmp/debug_face_snap.jpg"
-                    cv2.imwrite(snap_path, frame)
-                    print(f"[s] Snapshot saved to {snap_path}")
+                window_frames = 0
+                window_hits = 0
+                t_window = now
 
     except KeyboardInterrupt:
-        print("\n[Stopped] Ctrl+C received")
-
+        print("\n[Stopped] Ctrl+C")
     finally:
-        cap.release()
-        if gui:
-            cv2.destroyAllWindows()
-        print(f"\n[Done] Total detection rate for last window: check terminal above")
+        detector.stop()
+        total_rate = hit_n / max(frame_n, 1) * 100
+        print(f"\n{'='*50}")
+        print(f"  Total frames   : {frame_n}")
+        print(f"  Frames w/ face : {hit_n}  ({total_rate:.0f}%)")
+        print(f"  Avg FPS        : {frame_n / max(time.time() - t_start, 1):.1f}")
+        print(f"{'='*50}")
+
+        # Diagnostic summary
+        print()
+        if total_rate >= 70:
+            print("✅ Face detection is working well.")
+            print("   If assistant still doesn't greet, check FACE_STABLE_FRAMES=2")
+            print("   and GREET_COOLDOWN_SEC in pipeline/constants.py")
+        elif total_rate >= 20:
+            print("⚠️  Intermittent detection. Suggestions:")
+            print("   • Improve lighting (face needs to be well-lit)")
+            print("   • Sit closer to the camera (< 1.5m)")
+            print("   • Try --upsample 2 for smaller/farther faces")
+        else:
+            print("❌ Very low detection rate. Suggestions:")
+            print("   • Camera may be wrong index — try --camera 4")
+            print("   • Try --scale 1.0 --upsample 2")
+            print("   • Check lighting (dark room = HOG fails)")
+            print("   • Verify camera isn't already in use")
 
 
 if __name__ == "__main__":
