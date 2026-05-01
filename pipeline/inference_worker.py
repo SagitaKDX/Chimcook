@@ -197,35 +197,58 @@ class InferenceWorker:
             a._speech._audio_output.stop()      # Stop thinking chime
             return a._speech._handle_goodbye()
 
-        a._speech._add_to_history("user", text)
-
-        # ── RAG: try direct answer first (no LLM, <100ms) ─────────────────────
-        # Only skip the LLM for very high-confidence SINGLE-TOPIC matches.
-        # Multi-topic questions (score 0.45-0.75) go to the LLM for synthesis.
+        # ── RAG-only routing (FAQ architecture) ──────────────────────────────
+        # For a FAQ agent, the 1B LLM is too weak to reliably follow prompt rules:
+        # it ignores RULES, hallucinates, outputs markdown, and runs for 40+ seconds.
+        # Solution: raise the direct-answer threshold so all scored FAQ queries
+        # bypass the LLM entirely. Only use LLM when score >= 0.65 (truly no match).
+        #
+        # Thresholds:
+        #   score < 0.45  → ultra-specific single-topic → direct (top-1 chunk)
+        #   0.45 ≤ score < 0.65 → good match, possibly multi-topic → multi-chunk RAG
+        #   score >= 0.65 → weak/no match → LLM fallback (hallucination risk)
         _rag = RAGSearch(a)
+        a._speech._add_to_history("user", text)
         direct_answer, rag_score = _rag.direct_answer(text)
-        if direct_answer and rag_score < 0.45:   # ultra-specific match only
-            first_sentence_played_event.set()   # stop watchdog
-            a._speech._audio_output.stop()       # stop thinking chime
-            print(f"[RAG] ⚡ Direct answer — score={rag_score:.3f} (skipping LLM)")
-            print(f"\n🤖 Assistant (direct): {direct_answer}")
-            a._speech._add_to_history("assistant", direct_answer)
-            tts_audio, sr = a._speech._tts.synthesize(direct_answer)
+
+        if direct_answer and rag_score < 0.45:
+            # Ultra-specific single-topic: top-1 chunk is enough
+            first_sentence_played_event.set()
+            a._speech._audio_output.stop()
+            print(f"[RAG] ⚡ Direct — score={rag_score:.3f} (single-chunk, skipping LLM)")
+            answer_text = direct_answer
+
+        elif rag_score < 0.65:
+            # Multi-topic or moderate match: concatenate top-3 chunks, skip LLM
+            first_sentence_played_event.set()
+            a._speech._audio_output.stop()
+            print(f"[RAG] 📦 Multi-chunk — score={rag_score:.3f} (synthesising from RAG)")
+            raw_context = _rag.get_context(text, top_k=3)
+            if raw_context:
+                answer_text = raw_context.strip()
+            elif direct_answer:
+                answer_text = direct_answer
+            else:
+                answer_text = "I'm sorry, I don't have specific information about that."
+
+        else:
+            answer_text = None  # fall through to LLM
+
+        if answer_text is not None:
+            print(f"\n🤖 Assistant (RAG): {answer_text}")
+            a._speech._add_to_history("assistant", answer_text)
+            tts_audio, sr = a._speech._tts.synthesize(answer_text)
             seg_dur = len(tts_audio) / sr
             mute_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
             a._muted_until = mute_until
             a._speech._audio_output.play(tts_audio, sr)
             if a._wake_word:
                 a._wake_word.reset_full()
-            print(f"[VERIFY: PROC_COMPLETE] (direct RAG: score={rag_score:.3f})")
+            print(f"[VERIFY: PROC_COMPLETE] (RAG: score={rag_score:.3f})")
             return False, mute_until
 
-        # Score 0.45-0.75: good context exists but multi-topic — LLM synthesizes
-        # Score >= 0.75: weak context — LLM answers from general knowledge (hallucination risk!)
-        if rag_score < 0.75:
-            print(f"[RAG] 📦 LLM path — score={rag_score:.3f} (multi-topic synthesis)")
-        else:
-            print(f"[RAG] ⚠️  LLM path — score={rag_score:.3f} (weak context, hallucination risk)")
+        # ── LLM fallback: score >= 0.65, no good RAG match ───────────────────
+        print(f"[RAG] ⚠️  LLM fallback — score={rag_score:.3f} (no strong RAG match)")
 
         # ── LLM stream + TTS First-Byte-Out ─────────────────────────────────
         print("🤖 Thinking...", end="", flush=True)
@@ -234,32 +257,23 @@ class InferenceWorker:
         tz = datetime.timezone(datetime.timedelta(hours=7))
         current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
 
-        # Get RAG context — up to 3 chunks covering different aspects of the query
-        context = _rag.get_context(text, top_k=3)
+        context = _rag.get_context(text, top_k=2)  # Fewer chunks for LLM to stay focused
 
-        # System prompt — anti-hallucination with partial-answer allowance.
-        # The 1B model must not refuse to answer when it has PARTIAL context:
-        # prescribing an exact refusal phrase causes it to refuse even partial matches.
         dynamic_prompt = (
             f"{a.config.system_prompt}\n"
             f"The current date and time is {current_time}.\n"
         )
         if context:
             dynamic_prompt += (
-                f"Relevant facts from the knowledge base:\n{context}\n\n"
-                "RULES:\n"
-                "1. Answer using ONLY the facts above. Never add, infer, or invent.\n"
-                "2. If the facts partially cover the question, answer what you can and briefly note what is missing.\n"
-                "3. If the facts have NO relevant information at all, say: 'I don't have that in my knowledge base.'\n"
-                "4. 2 to 4 spoken sentences maximum. No lists or markdown.\n"
-                "5. Plain English. Spell out: 'G P A', '20 percent', 'Vietnam Dong'."
+                f"Facts from knowledge base:\n{context}\n\n"
+                "Answer in 1 to 2 sentences using ONLY these facts. "
+                "No lists. No markdown. Plain English only."
             )
         else:
             dynamic_prompt += (
-                "RULES:\n"
-                "1. No knowledge base context was found for this query.\n"
-                "2. Say: 'I don't have information about that in my knowledge base.'\n"
-                "3. Do NOT guess or invent facts."
+                "You have no relevant knowledge base information. "
+                "Say: 'I don't have information about that in my knowledge base.' "
+                "Do not invent facts."
             )
 
         history_for_llm = a._speech._conversation_history[:-1]
