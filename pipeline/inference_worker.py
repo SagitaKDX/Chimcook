@@ -197,84 +197,64 @@ class InferenceWorker:
             a._speech._audio_output.stop()      # Stop thinking chime
             return a._speech._handle_goodbye()
 
-        # ── RAG-only routing (FAQ architecture) ──────────────────────────────
-        # For a FAQ agent, the 1B LLM is too weak to reliably follow prompt rules:
-        # it ignores RULES, hallucinates, outputs markdown, and runs for 40+ seconds.
-        # Solution: raise the direct-answer threshold so all scored FAQ queries
-        # bypass the LLM entirely. Only use LLM when score >= 0.65 (truly no match).
+        # ── Routing ────────────────────────────────────────────────────────────
+        # Design: LLM is a *reformatter*, not a *knowledge source*.
+        # RAG always retrieves the facts; the LLM only rephrases them into
+        # smooth spoken English. This prevents hallucination while keeping
+        # the output natural.
         #
         # Thresholds:
-        #   score < 0.45  → ultra-specific single-topic → direct (top-1 chunk)
-        #   0.45 ≤ score < 0.65 → good match, possibly multi-topic → multi-chunk RAG
-        #   score >= 0.65 → weak/no match → LLM fallback (hallucination risk)
+        #   score < 0.30  → instant direct (no LLM wait, raw chunk → TTS)
+        #   0.30-0.75     → LLM reformats RAG chunks into spoken prose
+        #   >= 0.75       → no match → LLM says "I don't have that info"
         _rag = RAGSearch(a)
         a._speech._add_to_history("user", text)
         direct_answer, rag_score = _rag.direct_answer(text)
 
-        if direct_answer and rag_score < 0.45:
-            # Ultra-specific single-topic: top-1 chunk is enough
+        # ── Instant path: ultra-high confidence, skip LLM latency ─────────────
+        if direct_answer and rag_score < 0.30:
             first_sentence_played_event.set()
             a._speech._audio_output.stop()
-            print(f"[RAG] ⚡ Direct — score={rag_score:.3f} (single-chunk, skipping LLM)")
-            answer_text = direct_answer
-
-        elif rag_score < 0.65:
-            # Multi-topic or moderate match: concatenate top-3 chunks, skip LLM
-            first_sentence_played_event.set()
-            a._speech._audio_output.stop()
-            print(f"[RAG] 📦 Multi-chunk — score={rag_score:.3f} (synthesising from RAG)")
-            raw_context = _rag.get_context(text, top_k=3)
-            if raw_context:
-                answer_text = raw_context.strip()
-            elif direct_answer:
-                answer_text = direct_answer
-            else:
-                answer_text = "I'm sorry, I don't have specific information about that."
-
-        else:
-            answer_text = None  # fall through to LLM
-
-        if answer_text is not None:
-            print(f"\n🤖 Assistant (RAG): {answer_text}")
-            a._speech._add_to_history("assistant", answer_text)
-            tts_audio, sr = a._speech._tts.synthesize(answer_text)
+            print(f"[RAG] ⚡ Instant — score={rag_score:.3f}")
+            print(f"\n🤖 Assistant: {direct_answer}")
+            a._speech._add_to_history("assistant", direct_answer)
+            tts_audio, sr = a._speech._tts.synthesize(direct_answer)
             seg_dur = len(tts_audio) / sr
             mute_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
             a._muted_until = mute_until
             a._speech._audio_output.play(tts_audio, sr)
             if a._wake_word:
                 a._wake_word.reset_full()
-            print(f"[VERIFY: PROC_COMPLETE] (RAG: score={rag_score:.3f})")
+            print(f"[VERIFY: PROC_COMPLETE] (instant RAG: score={rag_score:.3f})")
             return False, mute_until
 
-        # ── LLM fallback: score >= 0.65, no good RAG match ───────────────────
-        print(f"[RAG] ⚠️  LLM fallback — score={rag_score:.3f} (no strong RAG match)")
-
-        # ── LLM stream + TTS First-Byte-Out ─────────────────────────────────
+        # ── LLM reformatter path ───────────────────────────────────────────────
         print("🤖 Thinking...", end="", flush=True)
         t1 = time.time()
 
-        tz = datetime.timezone(datetime.timedelta(hours=7))
-        current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
+        # Always fetch RAG context — LLM reformats it, never invents
+        context = _rag.get_context(text, top_k=3)
 
-        context = _rag.get_context(text, top_k=2)  # Fewer chunks for LLM to stay focused
-
-        dynamic_prompt = (
-            f"{a.config.system_prompt}\n"
-            f"The current date and time is {current_time}.\n"
-        )
-        if context:
-            dynamic_prompt += (
-                f"Facts from knowledge base:\n{context}\n\n"
-                "Answer in 1 to 2 sentences using ONLY these facts. "
-                "No lists. No markdown. Plain English only."
+        if context and rag_score < 0.75:
+            # Reformatter prompt: one simple instruction the 1B model can follow
+            dynamic_prompt = (
+                f"{a.config.system_prompt}\n"
+                "You are a voice assistant. Below are facts from a university knowledge base.\n"
+                "Rephrase ONLY these facts into 2 to 3 smooth spoken sentences.\n"
+                "Do NOT add any information not in the facts.\n"
+                "No bullet points, no markdown, no lists.\n\n"
+                f"FACTS:\n{context}"
             )
+            print(f"[RAG] 🔄 Reformat — score={rag_score:.3f} ({len(context)} chars)")
         else:
-            dynamic_prompt += (
-                "You have no relevant knowledge base information. "
-                "Say: 'I don't have information about that in my knowledge base.' "
-                "Do not invent facts."
+            # No relevant context — tell LLM to say "I don't know"
+            dynamic_prompt = (
+                f"{a.config.system_prompt}\n"
+                "You have no relevant information in your knowledge base for this query. "
+                "Say exactly: 'I'm sorry, I don't have information about that in my knowledge base.' "
+                "Do not add anything else."
             )
+            print(f"[RAG] ⚠️  No match — score={rag_score:.3f} (LLM will decline)")
 
         history_for_llm = a._speech._conversation_history[:-1]
 
@@ -283,6 +263,8 @@ class InferenceWorker:
         first_sentence_played = False
         mute_until = 0.0
         audio_duration_total = 0.0
+        sentences_played = 0          # Hard cap: stop after 3 sentences
+        MAX_SENTENCES = 3
 
         try:
             for token in a._components.llm.generate_stream(
@@ -290,6 +272,9 @@ class InferenceWorker:
                 history=history_for_llm,
                 system_prompt=dynamic_prompt,
             ):
+                if sentences_played >= MAX_SENTENCES:
+                    break              # Hard stop — prevents 43-second runaway
+
                 sentence_buf += token
                 full_response.append(token)
 
@@ -299,8 +284,8 @@ class InferenceWorker:
                         with watchdog_lock:
                             if not first_sentence_played:
                                 first_sentence_played = True
-                                first_sentence_played_event.set()  # Stop 30s watchdog
-                                a._speech._audio_output.stop()     # Stop thinking chime
+                                first_sentence_played_event.set()
+                                a._speech._audio_output.stop()
                                 llm_first_ms = int((time.time() - t1) * 1000)
                                 print(f"\r" + " " * 40 + "\r", end="")
                                 if a.config.debug:
@@ -314,6 +299,7 @@ class InferenceWorker:
                             audio_duration_total += seg_dur
                             a._muted_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
                             a._speech._audio_output.play(tts_audio, sr)
+                            sentences_played += 1
 
         except Exception as e:
             print(f"\n[LLM stream error: {e}]")
