@@ -58,7 +58,10 @@ _MD_BRACKET   = re.compile(r"^\[.*?\]\s*", re.MULTILINE)          # [Title > Sec
 _MD_BULLET    = re.compile(r"^[\*\-]\s+", re.MULTILINE)           # * bullet or - bullet
 _MD_LINK      = re.compile(r"\[([^\]]+)\]\([^)]+\)")              # [text](url)
 _MD_BACKTICK  = re.compile(r"`+(.+?)`+")                          # `inline code`
-_MD_SECTION_NUM = re.compile(r"^\d+(\.\d+)*\s+", re.MULTILINE)   # "1.3 " / "2.1.4 " prefixes
+# Strips multi-level section numbers like "1.3 " / "2.1.4 " from heading lines.
+# NOTE: simple ordinals like "4. " are intentionally NOT stripped here — they
+# are handled per-line in _format_for_speech so list items get ordinal words.
+_MD_SECTION_NUM = re.compile(r"^\d+(\.\d+)+\.?\s+", re.MULTILINE) # "1.3 " / "2.1.4 " only
 _MULTI_NL     = re.compile(r"\n{3,}")
 
 # Set True to print raw FAISS + BM25 scores on every query (useful when tuning)
@@ -85,14 +88,14 @@ def _strip_markdown(text: str) -> str:
     """
     t = _MD_BRACKET.sub("", text)      # remove [Title > Section] prefixes
     t = _MD_HEADING.sub("", t)         # remove ## markers (keep heading text)
-    t = _MD_SECTION_NUM.sub("", t)     # remove "1.3 " / "2.1.4 " section numbering
+    t = _MD_SECTION_NUM.sub("", t)     # remove multi-level "1.3 " / "2.1.4 " numbers
     t = _MD_LINK.sub(r"\1", t)         # [text](url) → text
     t = _MD_BOLD_IT.sub(r"\1", t)      # **bold** / *italic* → plain text
-    t = re.sub(r"\*+", "", t)          # mop up any remaining lone asterisks (**Key:** edge case)
+    t = re.sub(r"\*+", "", t)          # mop up any remaining lone asterisks
     t = _MD_BULLET.sub("", t)          # remove bullet markers
     t = _MD_BACKTICK.sub(r"\1", t)     # `code` → code
-    t = "\n".join(line.lstrip() for line in t.splitlines())  # remove indent left by bullet removal
-    t = _MULTI_NL.sub("\n\n", t)       # collapse 3+ blank lines
+    t = "\n".join(line.lstrip() for line in t.splitlines())
+    t = _MULTI_NL.sub("\n\n", t)
     return t.strip()
 
 
@@ -143,10 +146,16 @@ def _format_for_speech(raw_chunk: str) -> str:
             and not _NUMBERED_STEP.match(line)
         )
 
-    # Step 2: use first line as natural intro if it looks like a heading
+    # Step 2: use first line as natural intro if it looks like a heading.
+    # Also strip any leading section number (e.g. "4. " from "4. Registration Steps")
+    # that survived markdown stripping (simple ordinals like "4. " aren't caught by
+    # _MD_SECTION_NUM which only handles multi-level numbers like "1.3 ").
+    _SECTION_NUM_PREFIX = re.compile(r"^\d+(\.\d+)*\.?\s+")
     first, rest = lines[0], lines[1:]
-    if _is_heading_like(first) and rest:
-        intro = f"Regarding {first.lower().rstrip(':')}: "
+    # Strip leading section number from the heading candidate
+    first_clean = _SECTION_NUM_PREFIX.sub("", first).strip()
+    if _is_heading_like(first_clean) and rest:
+        intro = f"Regarding {first_clean.lower().rstrip(':')}: "
         lines = rest
     else:
         intro = ""
