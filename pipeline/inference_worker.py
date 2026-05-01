@@ -173,7 +173,18 @@ class InferenceWorker:
         print(f"\r" + " " * 60 + "\r", end="")
 
         if a.config.debug:
+            print(f"   [STT: {stt_ms}ms, lang={detected_language}]")
+        else:
             print(f"   [STT: {stt_ms}ms]")
+
+        # Language guard: skip non-English transcriptions.
+        # small.en always returns 'en'; multilingual models may detect Vietnamese etc.
+        lang_confidence = info.get("language_probability", 1.0)
+        if detected_language not in ("en", "english") and lang_confidence > 0.6:
+            print(f"[STT] ⚠️  Non-English detected: '{detected_language}' ({lang_confidence:.0%}) — skipping")
+            first_sentence_played_event.set()
+            a._speech._audio_output.stop()
+            return False, 0.0
 
         print(f"👤 You: {text}")
 
@@ -226,8 +237,9 @@ class InferenceWorker:
         # Get RAG context — up to 3 chunks covering different aspects of the query
         context = _rag.get_context(text, top_k=3)
 
-        # Tight system prompt: forces short, spoken-language answers from the 1B model.
-        # Anti-hallucination: explicitly forbid inventing facts not in the context.
+        # System prompt — anti-hallucination with partial-answer allowance.
+        # The 1B model must not refuse to answer when it has PARTIAL context:
+        # prescribing an exact refusal phrase causes it to refuse even partial matches.
         dynamic_prompt = (
             f"{a.config.system_prompt}\n"
             f"The current date and time is {current_time}.\n"
@@ -235,20 +247,19 @@ class InferenceWorker:
         if context:
             dynamic_prompt += (
                 f"Relevant facts from the knowledge base:\n{context}\n\n"
-                "STRICT RULES:\n"
-                "1. Answer using ONLY the facts above — do NOT add, infer, or invent anything.\n"
-                "2. If the facts do not contain the answer, say exactly: "
-                "'I\'m sorry, I don\'t have that specific information.'\n"
-                "3. Be concise — 2 to 4 spoken sentences maximum.\n"
-                "4. No lists, bullet points, or markdown. Plain conversational English only.\n"
-                "5. Spell out symbols: say 'G P A', '20 percent', 'Vietnam Dong' — never use symbols."
+                "RULES:\n"
+                "1. Answer using ONLY the facts above. Never add, infer, or invent.\n"
+                "2. If the facts partially cover the question, answer what you can and briefly note what is missing.\n"
+                "3. If the facts have NO relevant information at all, say: 'I don't have that in my knowledge base.'\n"
+                "4. 2 to 4 spoken sentences maximum. No lists or markdown.\n"
+                "5. Plain English. Spell out: 'G P A', '20 percent', 'Vietnam Dong'."
             )
         else:
             dynamic_prompt += (
-                "STRICT RULES:\n"
-                "1. You have no knowledge base context for this query.\n"
-                "2. Say: 'I\'m sorry, I don\'t have information about that in my knowledge base.'\n"
-                "3. Do NOT invent or guess any facts."
+                "RULES:\n"
+                "1. No knowledge base context was found for this query.\n"
+                "2. Say: 'I don't have information about that in my knowledge base.'\n"
+                "3. Do NOT guess or invent facts."
             )
 
         history_for_llm = a._speech._conversation_history[:-1]
