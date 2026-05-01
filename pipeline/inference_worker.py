@@ -196,6 +196,7 @@ class InferenceWorker:
         if direct_answer and rag_score < 0.45:   # ultra-specific match only
             first_sentence_played_event.set()   # stop watchdog
             a._speech._audio_output.stop()       # stop thinking chime
+            print(f"[RAG] ⚡ Direct answer — score={rag_score:.3f} (skipping LLM)")
             print(f"\n🤖 Assistant (direct): {direct_answer}")
             a._speech._add_to_history("assistant", direct_answer)
             tts_audio, sr = a._speech._tts.synthesize(direct_answer)
@@ -208,6 +209,13 @@ class InferenceWorker:
             print(f"[VERIFY: PROC_COMPLETE] (direct RAG: score={rag_score:.3f})")
             return False, mute_until
 
+        # Score 0.45-0.75: good context exists but multi-topic — LLM synthesizes
+        # Score >= 0.75: weak context — LLM answers from general knowledge (hallucination risk!)
+        if rag_score < 0.75:
+            print(f"[RAG] 📦 LLM path — score={rag_score:.3f} (multi-topic synthesis)")
+        else:
+            print(f"[RAG] ⚠️  LLM path — score={rag_score:.3f} (weak context, hallucination risk)")
+
         # ── LLM stream + TTS First-Byte-Out ─────────────────────────────────
         print("🤖 Thinking...", end="", flush=True)
         t1 = time.time()
@@ -219,7 +227,7 @@ class InferenceWorker:
         context = _rag.get_context(text, top_k=3)
 
         # Tight system prompt: forces short, spoken-language answers from the 1B model.
-        # The 1B model tends to ramble — 2-4 sentences is ideal for TTS output.
+        # Anti-hallucination: explicitly forbid inventing facts not in the context.
         dynamic_prompt = (
             f"{a.config.system_prompt}\n"
             f"The current date and time is {current_time}.\n"
@@ -227,16 +235,20 @@ class InferenceWorker:
         if context:
             dynamic_prompt += (
                 f"Relevant facts from the knowledge base:\n{context}\n\n"
-                "Instructions: Answer using ONLY the facts above. "
-                "Be concise — 2 to 4 spoken sentences maximum. "
-                "Do NOT use lists, bullet points, or markdown. "
-                "Speak in plain conversational English. "
-                "Write phonetics in full: say 'G P A', '20 percent', 'Vietnam Dong' — never use symbols."
+                "STRICT RULES:\n"
+                "1. Answer using ONLY the facts above — do NOT add, infer, or invent anything.\n"
+                "2. If the facts do not contain the answer, say exactly: "
+                "'I\'m sorry, I don\'t have that specific information.'\n"
+                "3. Be concise — 2 to 4 spoken sentences maximum.\n"
+                "4. No lists, bullet points, or markdown. Plain conversational English only.\n"
+                "5. Spell out symbols: say 'G P A', '20 percent', 'Vietnam Dong' — never use symbols."
             )
         else:
             dynamic_prompt += (
-                "Instructions: Answer briefly in 2 to 3 sentences. "
-                "Do NOT use lists or markdown. Plain conversational English only."
+                "STRICT RULES:\n"
+                "1. You have no knowledge base context for this query.\n"
+                "2. Say: 'I\'m sorry, I don\'t have information about that in my knowledge base.'\n"
+                "3. Do NOT invent or guess any facts."
             )
 
         history_for_llm = a._speech._conversation_history[:-1]

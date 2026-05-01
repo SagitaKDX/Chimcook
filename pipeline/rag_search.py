@@ -272,10 +272,8 @@ class RAGSearch:
         if answer and score < self.DIRECT_SCORE_THRESHOLD:
             # Format as natural spoken prose — no LLM, zero latency
             spoken = _format_for_speech(answer)
-            print(
-                f"[RAG] ⚡ Direct answer — score={score:.3f}, {elapsed_ms}ms "
-                f"(skipping LLM)"
-            )
+            if DEBUG_SCORES:
+                print(f"[RAG direct] query='{query}' score={score:.3f} ({elapsed_ms}ms)")
             return spoken, score
 
         return "", score
