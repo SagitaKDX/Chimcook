@@ -33,8 +33,7 @@ services:
       - ./recordings:/app/recordings      # Debug recordings
       - ./core:/app/core                  # Live code editing
       - ./pipeline:/app/pipeline          # Live code editing
-      - ./config:/app/config              # Live code editing
-      - ./utils:/app/utils                # Live code editing
+      - ./scripts:/app/scripts            # Debug and utility scripts
       - ./assets:/app/assets              # Sounds and images
       - ./data:/app/data                  # Knowledge base index and docs
       - ./templates:/app/templates        # Web UI HTML templates
