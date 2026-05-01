@@ -279,16 +279,22 @@ class RAGPipeline:
                 heading_match = re.match(r"^#{1,4}\s+(.+)", section)
                 section_heading = heading_match.group(1).strip() if heading_match else ""
 
-                def _make_chunk(content: str, part: int = 0) -> Document:
-                    if doc_title and section_heading:
-                        prefix = f"[{doc_title} > {section_heading}]\n"
-                    elif doc_title:
-                        prefix = f"[{doc_title}]\n"
+                def _make_chunk(
+                    content: str,
+                    part: int = 0,
+                    _title: str = doc_title,
+                    _heading: str = section_heading,
+                ) -> Document:
+                    """Closure uses default-arg capture to avoid Python late-binding."""
+                    if _title and _heading:
+                        prefix = f"[{_title} > {_heading}]\n"
+                    elif _title:
+                        prefix = f"[{_title}]\n"
                     else:
                         prefix = ""
                     return Document(
                         page_content=prefix + content,
-                        metadata={**metadata, "section": section_heading, "part": part},
+                        metadata={**metadata, "section": _heading, "part": part},
                     )
 
                 if len(section) <= self.chunk_size:
@@ -337,11 +343,8 @@ class RAGPipeline:
         chunks = self._section_aware_split(documents)
         print(f"[RAG] Section-aware split: {len(chunks)} chunks. Building FAISS index...")
 
-        # Build FAISS
-        if self.vector_store is None:
-            self.vector_store = FAISS.from_documents(chunks, self.embeddings)
-        else:
-            self.vector_store.add_documents(chunks)
+        # Build FAISS — always fresh (never append; re-ingest = full rebuild)
+        self.vector_store = FAISS.from_documents(chunks, self.embeddings)
 
         # Persist
         self.faiss_index_path.mkdir(parents=True, exist_ok=True)
@@ -350,6 +353,9 @@ class RAGPipeline:
         # Fit BM25
         self._chunk_texts = [c.page_content for c in chunks]
         self._bm25.fit(self._chunk_texts)
+
+        # Clear stale lru_cache entries from the old index
+        self._cached_context.cache_clear()
 
         print(f"[RAG] Index saved to {self.faiss_index_path}. BM25 fitted. Ready.")
 
@@ -404,14 +410,17 @@ class RAGPipeline:
             )
             combined.append((doc, combined_score))
 
-        # Sort best-first and deduplicate
+        # Sort best-first and deduplicate using a normalized content key
+        # (first 150 chars of stripped lowercase text) to catch cross-doc duplicates
         combined.sort(key=lambda x: x[1])
         seen: set = set()
         deduped: List[Tuple[Document, float]] = []
         for doc, score in combined:
-            key = doc.page_content[:100]
-            if key not in seen:
-                seen.add(key)
+            # Normalize: strip markdown prefix bracket, lowercase, first 150 chars
+            raw = doc.page_content
+            norm = re.sub(r"^\[.*?\]\s*", "", raw).strip().lower()[:150]
+            if norm not in seen:
+                seen.add(norm)
                 deduped.append((doc, score))
             if len(deduped) >= top_k:
                 break
@@ -455,7 +464,8 @@ class RAGPipeline:
         """Cached context retrieval for repeated queries."""
         results = self._hybrid_search(user_query, top_k=top_k)
         valid = [doc.page_content for doc, score in results if score < 0.9]
-        return "\n---\n".join(valid) if valid else ""
+        # Use plain blank-line separator — "---" can bleed into LLM output as "dash dash dash"
+        return "\n\n".join(valid) if valid else ""
 
     def get_context(self, user_query: str, top_k: int = 2) -> str:
         """
@@ -464,7 +474,9 @@ class RAGPipeline:
         """
         if self.vector_store is None or not user_query:
             return ""
-        return self._cached_context(user_query.strip().lower(), top_k)
+        # Cache on original stripped query (not lowercased) — lowercasing can
+        # reduce FAISS semantic similarity for models trained with mixed-case input.
+        return self._cached_context(user_query.strip(), top_k)
 
     def query(self, user_query: str, top_k: int = 3) -> str:
         """
@@ -501,24 +513,28 @@ class RAGPipeline:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    rag = RAGPipeline()
+    import sys as _sys
+    # Ensure project root is on path when run as: python core/rag.py
+    _root = Path(__file__).parent.parent
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
 
-    test_doc = Path("data/docs/test.txt")
-    if not test_doc.exists():
-        test_doc.parent.mkdir(parents=True, exist_ok=True)
-        test_doc.write_text(
-            "The IELTS requirement for admission is 4.5. "
-            "The English level fee is 14 million VND per level. "
-            "The one-time admission fee is 4.6 million VND."
-        )
+    rag = RAGPipeline(
+        docs_dir=str(_root / "data" / "docs"),
+        faiss_index_path=str(_root / "data" / "faiss_index"),
+        embedding_model_name=str(_root / "models" / "embed_onnx"),
+    )
 
-    rag.ingest_documents()
+    # Only ingest if no index exists — never contaminate with test data
+    if not (Path(rag.faiss_index_path)).exists():
+        rag.ingest_documents()
 
     for q in [
         "What is the IELTS score required?",
         "How much does each English level cost?",
         "What is the admission fee?",
+        "What scholarships are available?",
     ]:
         answer, score = rag.answer_direct(q)
         print(f"\n[Q] {q}")
-        print(f"[A] (score={score:.3f}) {answer[:120]}...")
+        print(f"[A] (score={score:.3f}) {answer[:120]}")

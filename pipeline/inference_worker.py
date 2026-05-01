@@ -18,6 +18,7 @@ Debugging tips
 
 from __future__ import annotations
 
+import datetime
 import queue
 import re
 import threading
@@ -31,6 +32,7 @@ from pipeline.constants import SESSION_DURATION_SEC, STOP_SENTINEL
 from pipeline.config import AssistantState, STATE_DISPLAY
 from pipeline.tts_stream import split_first_sentence
 from pipeline.rag_search import RAGSearch
+from pipeline.speech_processor import GOODBYE_PHRASES
 
 if TYPE_CHECKING:
     from pipeline.orchestrator_v2 import VoiceAssistant
@@ -145,14 +147,13 @@ class InferenceWorker:
         def processing_watchdog():
             if not first_sentence_played_event.wait(30.0):
                 with watchdog_lock:
-                    # If the event was NOT set within 30 seconds...
+                    # Double-check: LLM may have finished just before the 30s mark
                     if not first_sentence_played_event.is_set():
                         print("\n[Watchdog] Processing exceeded 30s, notifying user...")
-                        a._speech._audio_output.stop()
+                        a._speech._audio_output.stop()   # inside the guarded block
                         a._speech.say("I am currently working, wait a moment.")
-                        # Restart just the background processing loop smoothly
                         a._speech.play_thinking_chime(skip_speech=True)
-                    
+
         wd_thread = threading.Thread(target=processing_watchdog, daemon=True)
         wd_thread.start()
 
@@ -176,12 +177,10 @@ class InferenceWorker:
 
         print(f"👤 You: {text}")
 
-        # Query Expansion: Automatically map generic university mentions to Greenwich for RAG accuracy
-        import re
+        # Query Expansion: map generic university mentions to Greenwich for RAG accuracy
         text = re.sub(r'\b(?:my )?university\b', 'Greenwich Vietnam', text, flags=re.IGNORECASE)
 
         # Goodbye?
-        from pipeline.speech_processor import GOODBYE_PHRASES
         if any(p in text.lower() for p in GOODBYE_PHRASES):
             first_sentence_played_event.set()   # Stop watchdog
             a._speech._audio_output.stop()      # Stop thinking chime
@@ -213,7 +212,6 @@ class InferenceWorker:
         print("🤖 Thinking...", end="", flush=True)
         t1 = time.time()
 
-        import datetime
         tz = datetime.timezone(datetime.timedelta(hours=7))
         current_time = datetime.datetime.now(tz).strftime("%A, %Y-%m-%d %I:%M %p")
 
