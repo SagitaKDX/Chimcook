@@ -147,19 +147,24 @@ def _format_for_speech(raw_chunk: str) -> str:
         )
 
     # Step 2: use first line as natural intro if it looks like a heading.
-    # Also strip any leading section number (e.g. "4. " from "4. Registration Steps")
-    # that survived markdown stripping (simple ordinals like "4. " aren't caught by
-    # _MD_SECTION_NUM which only handles multi-level numbers like "1.3 ").
+    # Strip section number prefix (e.g. "4. ") that survives markdown stripping —
+    # _MD_SECTION_NUM only catches multi-level "1.3 " not simple "4. " style.
     _SECTION_NUM_PREFIX = re.compile(r"^\d+(\.\d+)*\.?\s+")
     first, rest = lines[0], lines[1:]
-    # Strip leading section number from the heading candidate
     first_clean = _SECTION_NUM_PREFIX.sub("", first).strip()
-    if _is_heading_like(first_clean) and rest:
-        intro = f"Regarding {first_clean.lower().rstrip(':')}: "
-        lines = rest
+
+    if _is_heading_like(first_clean):
+        if rest:
+            # Heading with body: turn heading into natural intro sentence
+            intro = f"Regarding {first_clean.lower().rstrip(':')}: "
+            lines = rest
+        else:
+            # Chunk is heading-only (no body) — speak it as a brief statement
+            # rather than letting _NUMBERED_STEP convert "4. X" → "After that, X"
+            return f"Regarding {first_clean.lower().rstrip(':')}."
     else:
         intro = ""
-        lines = [first] + rest
+        lines = [first_clean] + rest  # use first_clean to strip any leading number
 
     # Step 3: remove standalone sub-section headers inside the body
     # e.g. "Online Registration", "Required Documents" on their own line
