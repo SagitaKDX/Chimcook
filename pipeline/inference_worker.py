@@ -188,6 +188,30 @@ class InferenceWorker:
 
         print(f"👤 You: {text}")
 
+        # ── Text-content guards (catch small.en hallucinations) ────────────────
+        # small.en always reports lang=en but hallucinates non-English chars
+        # when given Vietnamese/Chinese speech. Check the transcribed text itself.
+
+        # Guard 1: Non-ASCII ratio — Vietnamese diacritics are ord > 127
+        _non_ascii = sum(1 for c in text if ord(c) > 127)
+        _non_ascii_ratio = _non_ascii / max(len(text), 1)
+        if _non_ascii_ratio > 0.15:
+            print(f"[STT] ⚠️  Non-ASCII content ({_non_ascii_ratio:.0%}) — likely non-English audio, skipping")
+            first_sentence_played_event.set()
+            a._speech._audio_output.stop()
+            return False, 0.0
+
+        # Guard 2: Repetition — "cịc cịc cịc cịc..." hallucination pattern
+        _words = text.split()
+        if len(_words) >= 6:
+            _most_common = max(set(_words), key=_words.count)
+            _repeat_ratio = _words.count(_most_common) / len(_words)
+            if _repeat_ratio > 0.40:
+                print(f"[STT] ⚠️  Repetitive transcription ('{_most_common}' x{_words.count(_most_common)}/{len(_words)}) — noise/non-English, skipping")
+                first_sentence_played_event.set()
+                a._speech._audio_output.stop()
+                return False, 0.0
+
         # Query Expansion: map generic university mentions to Greenwich for RAG accuracy
         text = re.sub(r'\b(?:my )?university\b', 'Greenwich Vietnam', text, flags=re.IGNORECASE)
 
