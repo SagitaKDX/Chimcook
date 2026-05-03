@@ -247,14 +247,42 @@ class InferenceWorker:
             )
             print(f"[RAG] 🔄 Reformat — score={rag_score:.3f} ({len(context)} chars)")
         else:
-            # No relevant context — tell LLM to say "I don't know"
-            dynamic_prompt = (
-                f"{a.config.system_prompt}\n"
-                "You have no relevant information in your knowledge base for this query. "
-                "Say exactly: 'I'm sorry, I don't have information about that in my knowledge base.' "
-                "Do not add anything else."
+            # No RAG match — decide: conversational chitchat or unrecognised FAQ?
+            # Heuristic: FAQ queries contain specific topic keywords or are long questions.
+            # Conversational inputs are corrections, acknowledgements, small talk.
+            _FAQ_KEYWORDS = {
+                "fee", "tuition", "scholarship", "ielts", "admission", "requirement",
+                "register", "enrollment", "enroll", "major", "course", "program",
+                "campus", "english", "gpa", "apply", "application", "document",
+                "cost", "price", "money", "payment", "refund", "policy",
+                "curriculum", "subject", "study", "graduate", "degree",
+            }
+            _words = set(text.lower().split())
+            _is_faq = bool(_words & _FAQ_KEYWORDS) or (
+                text.strip().endswith("?") and len(text.split()) > 5
             )
-            print(f"[RAG] ⚠️  No match — score={rag_score:.3f} (LLM will decline)")
+
+            if _is_faq:
+                # Unknown FAQ topic — politely decline to avoid hallucination
+                dynamic_prompt = (
+                    f"{a.config.system_prompt}\n"
+                    "You are a university FAQ assistant. "
+                    "You were asked a specific question but your knowledge base has no relevant information. "
+                    "Apologise briefly and suggest they contact the university directly. "
+                    "Keep it to 1 sentence. No markdown."
+                )
+                print(f"[RAG] ❓ Unknown FAQ — score={rag_score:.3f} (polite decline)")
+            else:
+                # Conversational input: correction, thanks, small talk, follow-up
+                # Let the LLM respond naturally as a helpful assistant
+                dynamic_prompt = (
+                    f"{a.config.system_prompt}\n"
+                    "You are a friendly university FAQ voice assistant. "
+                    "Respond naturally and helpfully to the user's message in 1 to 2 sentences. "
+                    "No markdown. Plain spoken English only."
+                )
+                print(f"[RAG] 💬 Conversational — score={rag_score:.3f} (natural reply)")
+
 
         history_for_llm = a._speech._conversation_history[:-1]
 
