@@ -322,12 +322,26 @@ class ComponentManager:
         return keys[0]
     
     def _init_rag(self) -> None:
-        """Initialize retrieval-augmented generation."""
+        """Initialize retrieval-augmented generation.
+        
+        Auto-ingests documents if the FAISS index is missing (e.g. after git clone).
+        """
         print("[+] RAG Knowledge Base...")
         try:
             from core.rag import RAGPipeline
+            from pathlib import Path
+
             self.rag = RAGPipeline()
-            print("      ✓ RAG loaded")
+
+            # Auto-ingest if index doesn't exist yet (fresh clone / reset)
+            index_file = Path("data/faiss_index/index.faiss")
+            if not index_file.exists():
+                print("      ⚠️  No FAISS index found — building from data/docs/ ...")
+                self.rag.ingest_documents()
+                print("      ✓ RAG index built and saved")
+            else:
+                print("      ✓ RAG loaded")
+
         except Exception as e:
             print(f"      ✗ RAG failed to initialize: {e}")
             self.rag = None
