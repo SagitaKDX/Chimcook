@@ -247,7 +247,7 @@ class InferenceWorker:
             mute_until = time.time() + seg_dur + (a.config.mute_during_speech_ms / 1000.0)
             a._muted_until = mute_until
             a._speech._audio_output.play(tts_audio, sr)
-            a._speech._audio_output.play_beep()
+            a._speech._audio_output.play_finish_beep()
             if a._wake_word:
                 a._wake_word.reset_full()
             print(f"[VERIFY: PROC_COMPLETE] (instant RAG: score={rag_score:.3f})")
@@ -391,7 +391,7 @@ class InferenceWorker:
             a._speech._add_to_history("assistant", full_text)
 
         # Beep to signal the assistant finished speaking and is ready for the user.
-        a._speech._audio_output.play_beep()
+        a._speech._audio_output.play_finish_beep()
 
         # Final safety mute
         mute_until = time.time() + (a.config.mute_during_speech_ms / 1000.0)

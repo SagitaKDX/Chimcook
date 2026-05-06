@@ -264,9 +264,9 @@ class AudioOutput:
 
     def play_beep(
         self,
-        frequency_hz: float = 880.0,
-        duration_ms: int = 140,
-        amplitude: float = 0.22,
+        frequency_hz: float = 1046.0,
+        duration_ms: int = 220,
+        amplitude: float = 0.45,
         sample_rate: int = 44100,
         blocking: bool = True,
     ) -> None:
@@ -294,6 +294,20 @@ class AudioOutput:
         tone *= envelope
         tone *= float(np.clip(amplitude, 0.0, 1.0))
         self.play(tone, sample_rate, blocking=blocking)
+
+    def play_finish_beep(self) -> None:
+        """
+        Play an end-of-response notification sound.
+
+        Uses a 2-tone chirp and falls back gracefully so inference never crashes
+        if the notification sound fails on a specific host audio stack.
+        """
+        try:
+            self.play_beep(frequency_hz=880.0, duration_ms=140, amplitude=0.45, blocking=True)
+            time.sleep(0.04)
+            self.play_beep(frequency_hz=1174.0, duration_ms=170, amplitude=0.45, blocking=True)
+        except Exception as e:
+            print(f"[AudioOutput] Warning: finish beep failed: {e}")
     
     @staticmethod
     def list_devices() -> List[dict]:
