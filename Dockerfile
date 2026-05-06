@@ -93,13 +93,15 @@ RUN chmod +x scripts/download_models.sh && \
 # Now copy application code (changes frequently)
 COPY core/ ./core/
 COPY pipeline/ ./pipeline/
-COPY utils/ ./utils/
-COPY config/ ./config/
 COPY assets/ ./assets/
 COPY templates/ ./templates/
 COPY static/ ./static/
 COPY web_ui.py ./
 COPY .env.example ./.env.example
+
+# `utils/` and `config/` can be empty locally; create them explicitly so
+# runtime paths always exist without failing Docker COPY.
+RUN mkdir -p ./utils ./config
 
 # Copy .env if it exists, otherwise use example
 COPY .env* ./
