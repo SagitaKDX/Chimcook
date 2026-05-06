@@ -44,6 +44,8 @@ services:
       - PULSE_SERVER=unix:/run/user/1000/pulse/native
       - PULSE_COOKIE=/root/.config/pulse/cookie
       - XDG_RUNTIME_DIR=/run/user/1000
+      # Host playback sink (see: pactl list short sinks). Override PULSE_SINK in .env if PCI id differs.
+      - PULSE_SINK=${PULSE_SINK:-alsa_output.pci-0000_00_1f.3.analog-stereo}
       - AUDIO_DEVICE=${AUDIO_DEVICE:-}
       - CAMERA_NAME=${CAMERA_NAME:-USB2.0}  # Matches 'USB2.0 HD UVC WebCam' — override with CAMERA_NAME env var
       - CAMERA_INDEX=${CAMERA_INDEX:-0}   # Fallback index if name not found
