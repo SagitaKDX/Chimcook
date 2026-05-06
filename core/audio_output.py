@@ -261,6 +261,39 @@ class AudioOutput:
             self.play(audio, sample_rate, blocking=True)
             if gap_ms > 0:
                 time.sleep(gap_seconds)
+
+    def play_beep(
+        self,
+        frequency_hz: float = 880.0,
+        duration_ms: int = 140,
+        amplitude: float = 0.22,
+        sample_rate: int = 44100,
+        blocking: bool = True,
+    ) -> None:
+        """
+        Play a short notification beep.
+
+        Args:
+            frequency_hz: Beep frequency in Hz
+            duration_ms: Duration in milliseconds
+            amplitude: Beep loudness multiplier (0.0-1.0)
+            sample_rate: Beep sample rate
+            blocking: If True, wait for beep completion
+        """
+        duration_s = max(duration_ms, 20) / 1000.0
+        t = np.linspace(0, duration_s, int(sample_rate * duration_s), dtype=np.float32, endpoint=False)
+        tone = np.sin(2 * np.pi * frequency_hz * t).astype(np.float32)
+
+        # Gentle attack/release keeps the beep pleasant and avoids clicks.
+        attack = max(1, int(0.01 * sample_rate))
+        release = max(1, int(0.02 * sample_rate))
+        envelope = np.ones_like(tone)
+        envelope[:attack] = np.linspace(0.0, 1.0, attack, dtype=np.float32)
+        envelope[-release:] = np.linspace(1.0, 0.0, release, dtype=np.float32)
+
+        tone *= envelope
+        tone *= float(np.clip(amplitude, 0.0, 1.0))
+        self.play(tone, sample_rate, blocking=blocking)
     
     @staticmethod
     def list_devices() -> List[dict]:
